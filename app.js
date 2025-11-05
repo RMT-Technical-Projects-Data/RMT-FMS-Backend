@@ -116,14 +116,54 @@ app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "jade");
 
 // Middleware setup
+// app.use(
+//   cors({
+//     origin: [
+//       "http://13.233.6.224:3005",
+//       "https://13.233.6.224",
+
+//       "http://localhost:5173",
+//       "https://rmtfms.duckdns.org/",
+//       "https://rmtfms.duckdns.org/login",
+//     ], // your frontend URL
+//     credentials: true, // allow Authorization headers or cookies
+//     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+//     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+//     exposedHeaders: ["Content-Disposition"], // allow frontend to read file names
+//   })
+// );
+// For development - allow all origins (remove in production)
 app.use(
   cors({
-    origin: "*",
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://13.233.6.224:3005",
+        "http://13.233.6.224",
+        "https://13.233.6.224:3005",
+        "https://13.233.6.224",
+        "http://rmtfms.duckdns.org",
+        "https://rmtfms.duckdns.org",
+      ];
+
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        console.log("Blocked by CORS:", origin);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    exposedHeaders: ["Content-Disposition"],
   })
 );
-
 app.use(logger("dev"));
 app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ extended: false, limit: "500mb" }));

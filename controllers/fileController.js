@@ -2,6 +2,7 @@
 const knex = require("../config/db");
 const path = require("path"); // Add this if missing
 const fs = require("fs"); // Add this if missing
+const mime = require("mime-types");
 
 const {
   uploadFile,
@@ -281,24 +282,33 @@ const downloadFile = async (req, res, next) => {
     const fileId = parseInt(req.params.id);
     const userId = req.user.id;
     const userRole = req.user.role;
-    
-    console.log(`📥 [downloadFile] Download request - File ID: ${fileId}, User ID: ${userId}, Role: ${userRole}`);
-    
+
+    console.log(
+      `📥 [downloadFile] Download request - File ID: ${fileId}, User ID: ${userId}, Role: ${userRole}`
+    );
+
     req.resourceType = "file";
     req.resourceId = fileId;
     req.action = "download";
 
     const file = await getFileById(fileId);
-    console.log(`📥 [downloadFile] File from DB:`, file ? {
-      id: file.id,
-      name: file.name,
-      created_by: file.created_by,
-      file_path: file.file_path,
-      is_deleted: file.is_deleted
-    } : 'NOT FOUND');
-    
+    console.log(
+      `📥 [downloadFile] File from DB:`,
+      file
+        ? {
+            id: file.id,
+            name: file.name,
+            created_by: file.created_by,
+            file_path: file.file_path,
+            is_deleted: file.is_deleted,
+          }
+        : "NOT FOUND"
+    );
+
     if (!file) {
-      console.log(`❌ [downloadFile] File not found in database - ID: ${fileId}`);
+      console.log(
+        `❌ [downloadFile] File not found in database - ID: ${fileId}`
+      );
       return res.status(404).json({ error: "File not found" });
     }
 
@@ -319,20 +329,21 @@ const downloadFile = async (req, res, next) => {
       console.log(`❌ [downloadFile] File path is null - ID: ${fileId}`);
       return res.status(404).json({ error: "File path not found" });
     }
-    
+
     if (!require("fs").existsSync(file.file_path)) {
-      console.log(`❌ [downloadFile] File does not exist on server - Path: ${file.file_path}`);
+      console.log(
+        `❌ [downloadFile] File does not exist on server - Path: ${file.file_path}`
+      );
       return res.status(404).json({ error: "File not found on server" });
     }
 
-    console.log(`✅ [downloadFile] File found, streaming - Path: ${file.file_path}`);
+    console.log(
+      `✅ [downloadFile] File found, streaming - Path: ${file.file_path}`
+    );
 
     // Set appropriate headers for download
     res.setHeader("Content-Type", file.mime_type || "application/octet-stream");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${ file.name}"`
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
     // Stream the file
     const fileStream = require("fs").createReadStream(file.file_path);
@@ -342,7 +353,72 @@ const downloadFile = async (req, res, next) => {
     next(err);
   }
 };
+const openFile = async (req, res, next) => {
+  try {
+    const fileId = parseInt(req.params.id);
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
+    console.log(
+      `🟢 [openFile] Open request - File ID: ${fileId}, User ID: ${userId}, Role: ${userRole}`
+    );
+
+    req.resourceType = "file";
+    req.resourceId = fileId;
+    req.action = "open";
+
+    const file = await getFileById(fileId);
+
+    console.log(
+      `🟢 [openFile] File from DB:`,
+      file
+        ? {
+            id: file.id,
+            name: file.name,
+            created_by: file.created_by,
+            file_path: file.file_path,
+            is_deleted: file.is_deleted,
+          }
+        : "NOT FOUND"
+    );
+
+    if (!file) {
+      console.log(`❌ [openFile] File not found in DB - ID: ${fileId}`);
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    if (file.is_deleted) {
+      console.log(`❌ [openFile] File is deleted - ID: ${fileId}`);
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    if (!file.file_path || !fs.existsSync(file.file_path)) {
+      console.log(
+        `❌ [openFile] File missing on server - Path: ${file.file_path}`
+      );
+      return res.status(404).json({ error: "File not found on server" });
+    }
+
+    const mimeType =
+      file.mime_type ||
+      mime.lookup(file.file_path) ||
+      "application/octet-stream";
+
+    console.log(`✅ [openFile] Streaming file inline - MIME: ${mimeType}`);
+
+    // ✅ Set headers for viewing inline (not download)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+
+    const fileStream = fs.createReadStream(file.file_path);
+    fileStream.pipe(res);
+  } catch (err) {
+    console.error("❌ [openFile] Error:", err);
+    next(err);
+  }
+};
 // ✅ Fixed getFiles
 const getFiles = async (req, res, next) => {
   console.log("into the get files");
@@ -477,7 +553,6 @@ const toggleFileFavouriteController = async (req, res, next) => {
   }
 };
 
-
 const getFavouriteFilesController = async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -535,4 +610,5 @@ module.exports = {
   getTrashFilesController,
   restoreFileController,
   permanentDeleteFileController,
+  openFile,
 };

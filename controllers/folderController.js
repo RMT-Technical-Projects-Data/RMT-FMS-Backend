@@ -350,6 +350,7 @@ const downloadFolder = async (req, res, next) => {
         "Content-Disposition",
         `attachment; filename="${folder.name}.zip"`
       );
+console.log("lets check folder name here", folder.name);
 
       archive.pipe(res);
       archive.finalize();

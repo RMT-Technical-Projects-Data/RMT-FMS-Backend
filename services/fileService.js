@@ -418,6 +418,52 @@ const restoreFile = async (fileId) => {
   return { id: fileId, restored: true };
 };
 
+const moveFile = async (fileId, targetFolderIds, userId) => {
+  const trx = await knex.transaction();
+  try {
+    const file = await trx("files").where({ id: fileId }).first();
+    if (!file) throw new Error("File not found");
+
+    if (!targetFolderIds || targetFolderIds.length === 0) {
+      throw new Error("No target folders specified");
+    }
+
+    // 1. Move to first folder (Update original file)
+    const firstFolderId = targetFolderIds[0];
+    await trx("files")
+      .where({ id: fileId })
+      .update({
+        folder_id: firstFolderId,
+        updated_at: new Date(),
+      });
+
+    // 2. Copy to other folders (Insert new records pointing to same file)
+    for (let i = 1; i < targetFolderIds.length; i++) {
+      const folderId = targetFolderIds[i];
+      await trx("files").insert({
+        name: file.name,
+        original_name: file.original_name,
+        folder_id: folderId,
+        file_path: file.file_path, // Point to same physical file
+        file_url: file.file_url,
+        mime_type: file.mime_type,
+        size: file.size,
+        created_by: userId,
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_faviourite: false, // Reset favourite for copies
+        is_deleted: false,
+      });
+    }
+
+    await trx.commit();
+    return { message: "File moved successfully" };
+  } catch (error) {
+    await trx.rollback();
+    throw error;
+  }
+};
+
 const permanentDeleteFile = async (fileId) => {
   // Get file info before deletion
   const file = await knex("files").where({ id: fileId }).first();
@@ -425,10 +471,26 @@ const permanentDeleteFile = async (fileId) => {
     throw new Error("File not found");
   }
 
-  // Delete physical file
-  const fs = require("fs");
-  if (file.file_path && fs.existsSync(file.file_path)) {
-    fs.unlinkSync(file.file_path);
+  // Check if any other file uses the same path
+  const otherFiles = await knex("files")
+    .where({ file_path: file.file_path })
+    .whereNot({ id: fileId })
+    .first();
+
+  // Delete physical file ONLY if no other references exist
+  if (!otherFiles) {
+    const fs = require("fs");
+    if (file.file_path && fs.existsSync(file.file_path)) {
+      try {
+        fs.unlinkSync(file.file_path);
+      } catch (err) {
+        console.error("Error deleting physical file:", err);
+      }
+    }
+  } else {
+    console.log(
+      `ℹ️ Skipping physical file deletion for ${fileId} because it is shared by other files.`
+    );
   }
 
   // Delete file record
@@ -451,4 +513,5 @@ module.exports = {
   getFilesFromFolderRecursively,
   restoreFile,
   permanentDeleteFile,
+  moveFile,
 };

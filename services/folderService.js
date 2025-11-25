@@ -84,20 +84,20 @@ const getFolder = async (id) => {
 
 const getUserFolders = async (userId) => {
   const result = await knex("folders")
-    .leftJoin("user_favourite_folders", function() {
+    .leftJoin("user_favourite_folders", function () {
       this.on("folders.id", "=", "user_favourite_folders.folder_id")
-          .andOn("user_favourite_folders.user_id", "=", userId);
+        .andOn("user_favourite_folders.user_id", "=", userId);
     })
     .select("folders.*", knex.raw("CASE WHEN user_favourite_folders.folder_id IS NOT NULL THEN true ELSE false END as favourited"))
     .where({ created_by: userId })
     .andWhere("is_deleted", false)
     .orderBy("created_at", "desc");
-  
+
   console.log("🔍 [getUserFolders] Result for user:", userId, "folders:", result.length);
   if (result.length > 0) {
     console.log("🔍 [getUserFolders] First folder favourited:", result[0].favourited);
   }
-  
+
   return result;
 };
 
@@ -168,9 +168,38 @@ const deleteFolder = async (folderId) => {
 };
 
 const getFolderTree = async (userId) => {
-  return knex("folders")
+  const folders = await knex("folders")
     .select("id", "name", "parent_id")
-    .where({ created_by: userId });
+    .where({ created_by: userId })
+    .andWhere("is_deleted", false);
+
+  const folderMap = new Map();
+  const rootFolders = [];
+
+  // Initialize map
+  folders.forEach((folder) => {
+    folder.nested_folders = [];
+    folderMap.set(folder.id, folder);
+  });
+
+  // Build tree
+  folders.forEach((folder) => {
+    if (folder.parent_id) {
+      const parent = folderMap.get(folder.parent_id);
+      if (parent) {
+        parent.nested_folders.push(folder);
+      } else {
+        // Parent might be deleted or not found, treat as root or ignore?
+        // For now, if parent not found in this set, ignore or add to root if appropriate.
+        // But since we filtered by user, maybe parent belongs to another user?
+        // Safest is to only add if parent exists.
+      }
+    } else {
+      rootFolders.push(folder);
+    }
+  });
+
+  return rootFolders;
 };
 // Recursively get all nested folder IDs
 const getAllNestedFolderIds = async (parentId) => {
@@ -202,7 +231,7 @@ const getAllNestedFileIds = async (folderId) => {
 
 const toggleFolderFavourite = async (userId, folderId) => {
   console.log("🔄 [toggleFolderFavourite] Starting toggle for folder:", folderId, "user:", userId);
-  
+
   // Check if folder exists
   const folder = await knex("folders").where({ id: folderId }).first();
   if (!folder) throw new Error("Folder not found");
@@ -225,10 +254,10 @@ const toggleFolderFavourite = async (userId, folderId) => {
   } else {
     // FAVOURITE - Insert into table
     await knex("user_favourite_folders")
-      .insert({ 
-        user_id: userId, 
-        folder_id: folderId, 
-        created_at: new Date() 
+      .insert({
+        user_id: userId,
+        folder_id: folderId,
+        created_at: new Date()
       });
 
     console.log("✅ [toggleFolderFavourite] Favourited folder:", folderId);
@@ -384,7 +413,7 @@ const getNestedFiles = async (folderId, userId) => {
   return knex("files")
     .where({ folder_id: folderId })
     .andWhere("is_deleted", false)
-    .orderBy("created_at", "desc");
+    .orderBy("created_at", "desc");
 };
 
 const getTrashFolders = async (userId, parentId = null) => {

@@ -17,6 +17,7 @@ const {
   getTrashFiles,
   restoreFile,
   permanentDeleteFile,
+  moveFile,
 } = require("../services/fileService");
 const uploadFiles = async (req, res, next) => {
   try {
@@ -249,9 +250,8 @@ const uploadFolderWithFiles = async (req, res) => {
     // Return the structure that frontend expects
     res.status(200).json({
       files: uploadedFiles, // This is what the frontend expects
-      message: `✅ ${
-        uploadType === "folder" ? "Folder" : "Files"
-      } uploaded successfully!`,
+      message: `✅ ${uploadType === "folder" ? "Folder" : "Files"
+        } uploaded successfully!`,
       fileCount: uploadedFiles.length,
       folderCount: allPaths.length,
     });
@@ -296,12 +296,12 @@ const downloadFile = async (req, res, next) => {
       `📥 [downloadFile] File from DB:`,
       file
         ? {
-            id: file.id,
-            name: file.name,
-            created_by: file.created_by,
-            file_path: file.file_path,
-            is_deleted: file.is_deleted,
-          }
+          id: file.id,
+          name: file.name,
+          created_by: file.created_by,
+          file_path: file.file_path,
+          is_deleted: file.is_deleted,
+        }
         : "NOT FOUND"
     );
 
@@ -373,12 +373,12 @@ const openFile = async (req, res, next) => {
       `🟢 [openFile] File from DB:`,
       file
         ? {
-            id: file.id,
-            name: file.name,
-            created_by: file.created_by,
-            file_path: file.file_path,
-            is_deleted: file.is_deleted,
-          }
+          id: file.id,
+          name: file.name,
+          created_by: file.created_by,
+          file_path: file.file_path,
+          is_deleted: file.is_deleted,
+        }
         : "NOT FOUND"
     );
 
@@ -598,6 +598,28 @@ const permanentDeleteFileController = async (req, res, next) => {
   }
 };
 
+const moveFileController = async (req, res, next) => {
+  try {
+    const fileId = parseInt(req.params.id);
+    const { targetFolderIds } = req.body;
+    const userId = req.user.id;
+
+    // Call the service
+    const result = await moveFile(fileId, targetFolderIds, userId);
+    res.json(result);
+
+  } catch (err) {
+    // ✅ Check specifically for the "File not found" error thrown by your service
+    if (err.message === "File not found") {
+      console.warn(`⚠️ Move failed: File ${req.params.id} does not exist.`);
+      return res.status(404).json({ error: "This file no longer exists. Please refresh the page." });
+    }
+
+    // For all other errors, pass to the global error handler
+    next(err);
+  }
+};
+
 module.exports = {
   uploadFolderWithFiles,
   downloadFile,
@@ -611,4 +633,5 @@ module.exports = {
   restoreFileController,
   permanentDeleteFileController,
   openFile,
+  moveFileController,
 };

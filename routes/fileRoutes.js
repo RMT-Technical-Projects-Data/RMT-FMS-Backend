@@ -16,6 +16,7 @@ const {
   restoreFileController,
   permanentDeleteFileController,
   openFile,
+  moveFileController,
 } = require("../controllers/fileController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
@@ -143,6 +144,8 @@ const setFileResourceInfo = (req, res, next) => {
     req.action = "delete";
   } else if (req.method === "POST" && req.path.includes("/favourite/toggle")) {
     req.action = "edit";
+  } else if (req.method === "POST" && req.path.includes("/move")) {
+    req.action = "edit";
   }
 
   next();
@@ -207,6 +210,14 @@ router.delete(
   setFileResourceInfo,
   checkPermission,
   deleteFileById
+);
+
+router.post(
+  "/:id/move",
+  authMiddleware,
+  setFileResourceInfo,
+  checkPermission,
+  moveFileController
 );
 
 // Favourites and Trash routes

@@ -266,11 +266,11 @@ setTimeout(cleanupTrash, 10000); // Wait 10s for DB connection
 // ---------------------------
 // START THE SERVER
 // ---------------------------
-const PORT = process.env.PORT || 5000;
+// const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`✅ Server is running on port ${PORT}`);
-  console.log(`🌐 Health Check: http://localhost:${PORT}/api/health`);
-});
+// app.listen(PORT, () => {
+//   console.log(`✅ Server is running on port ${PORT}`);
+//   console.log(`🌐 Health Check: http://localhost:${PORT}/api/health`);
+// });
 
 module.exports = app;

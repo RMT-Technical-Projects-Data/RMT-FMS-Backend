@@ -210,6 +210,60 @@ app.use((err, req, res, next) => {
 app.use(errorMiddleware);
 
 // ---------------------------
+// CRON JOB: Auto-delete trash > 30 days
+// ---------------------------
+const { permanentDeleteFolder } = require("./services/folderService");
+const { permanentDeleteFile } = require("./services/fileService");
+const knex = require("./config/db");
+
+const cleanupTrash = async () => {
+  try {
+    console.log("🧹 [CRON] Starting trash cleanup...");
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    // 1. Find folders to delete
+    const foldersToDelete = await knex("folders")
+      .where("is_deleted", true)
+      .andWhere("deleted_at", "<", thirtyDaysAgo)
+      .select("id", "name");
+
+    for (const folder of foldersToDelete) {
+      console.log(`🗑️ [CRON] Auto-deleting folder: ${folder.name} (${folder.id})`);
+      await permanentDeleteFolder(folder.id);
+    }
+
+    // 2. Find files to delete
+    const filesToDelete = await knex("files")
+      .where("is_deleted", true)
+      .andWhere("deleted_at", "<", thirtyDaysAgo)
+      .select("id", "name");
+
+    for (const file of filesToDelete) {
+      console.log(`🗑️ [CRON] Auto-deleting file: ${file.name} (${file.id})`);
+      await permanentDeleteFile(file.id);
+    }
+
+    if (foldersToDelete.length > 0 || filesToDelete.length > 0) {
+      console.log(`✅ [CRON] Cleanup complete. Deleted ${foldersToDelete.length} folders and ${filesToDelete.length} files.`);
+    } else {
+      console.log("✅ [CRON] No items to clean up.");
+    }
+  } catch (error) {
+    console.error("❌ [CRON] Error during trash cleanup:", error);
+  }
+};
+
+// Run cleanup every day at midnight (or on server start for now)
+// Using setInterval for simplicity (24 hours)
+const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+setInterval(cleanupTrash, TWENTY_FOUR_HOURS);
+
+// Run once on startup to check immediately
+setTimeout(cleanupTrash, 10000); // Wait 10s for DB connection
+
+
+// ---------------------------
 // START THE SERVER
 // ---------------------------
 const PORT = process.env.PORT || 5000;

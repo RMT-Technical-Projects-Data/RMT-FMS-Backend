@@ -153,12 +153,12 @@ const deleteFolder = async (folderId) => {
   // Mark current folder
   await knex("folders")
     .where({ id: folderId })
-    .update({ is_deleted: true, updated_at: new Date() });
+    .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
 
   // Mark files in this folder
   await knex("files")
     .where({ folder_id: folderId })
-    .update({ is_deleted: true, updated_at: new Date() });
+    .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
 
   // Recurse into subfolders
   const subfolders = await knex("folders").where({ parent_id: folderId });
@@ -460,7 +460,7 @@ const restoreFolder = async (folderId) => {
   // Restore folder and all its children recursively
   await knex("folders")
     .where({ id: folderId })
-    .update({ is_deleted: false, updated_at: new Date() });
+    .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });
 
   // Get all child folders
   const childFolders = await knex("folders")
@@ -477,7 +477,7 @@ const restoreFolder = async (folderId) => {
   await knex("files")
     .where({ folder_id: folderId })
     .andWhere("is_deleted", true)
-    .update({ is_deleted: false, updated_at: new Date() });
+    .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });
 
   return { id: folderId, restored: true };
 };

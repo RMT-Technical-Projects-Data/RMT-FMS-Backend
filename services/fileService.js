@@ -243,9 +243,9 @@ const getFile = async (fileId) => {
 const getUserFiles = async (userId, folder_id = null) => {
   let query = knex("files")
     .leftJoin("folders", "files.folder_id", "folders.id")
-    .leftJoin("user_favourite_files", function() {
+    .leftJoin("user_favourite_files", function () {
       this.on("files.id", "=", "user_favourite_files.file_id")
-          .andOn("user_favourite_files.user_id", "=", userId);
+        .andOn("user_favourite_files.user_id", "=", userId);
     })
     .select("files.*", "folders.name as folder_name", knex.raw("CASE WHEN user_favourite_files.file_id IS NOT NULL THEN true ELSE false END as favourited"))
     .where("files.created_by", userId)
@@ -256,12 +256,12 @@ const getUserFiles = async (userId, folder_id = null) => {
   }
 
   const result = await query.orderBy("files.created_at", "desc");
-  
+
   console.log("🔍 [getUserFiles] Result for user:", userId, "folder:", folder_id, "files:", result.length);
   if (result.length > 0) {
     console.log("🔍 [getUserFiles] First file favourited:", result[0].favourited);
   }
-  
+
   return result;
 };
 
@@ -280,7 +280,7 @@ const deleteFile = async (fileId) => {
   // Soft delete: mark as deleted, do not remove physical file immediately
   await knex("files")
     .where({ id: fileId })
-    .update({ is_deleted: true, updated_at: new Date() });
+    .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
 };
 const toggleFileFavourite = async (fileId, userId) => {
   // Check if file exists
@@ -413,7 +413,7 @@ const getTrashFiles = async (userId, folderId = null) => {
 const restoreFile = async (fileId) => {
   await knex("files")
     .where({ id: fileId })
-    .update({ is_deleted: false, updated_at: new Date() });
+    .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });
 
   return { id: fileId, restored: true };
 };

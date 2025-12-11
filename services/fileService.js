@@ -69,11 +69,15 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
   }
 };
 
-const uploadFolder = async (files, parentId, userId) => {
+const uploadFolder = async (files, parentId, userId, paths = []) => {
   console.log("🚀 UPLOAD FOLDER SERVICE START");
   console.log("Files count:", files.length);
   console.log("Parent ID:", parentId);
   console.log("User ID:", userId);
+
+  // Ensure paths is an array (might be string if single file)
+  const filePaths = Array.isArray(paths) ? paths : (paths ? [paths] : []);
+  console.log("Paths provided:", filePaths.length);
 
   // Validate inputs
   if (!files || files.length === 0) {
@@ -109,10 +113,12 @@ const uploadFolder = async (files, parentId, userId) => {
     console.log("🔍 Starting folder upload process...");
 
     // Process each file and create necessary folder structure
-    for (const file of files) {
-      // For folder uploads, use webkitRelativePath if available, otherwise fall back to originalname
-      const filePath =
-        file.webkitRelativePath || file.originalname || file.name;
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      // Use provided path if available, otherwise originalname
+      const providedPath = filePaths[i];
+      const filePath = providedPath || file.webkitRelativePath || file.originalname || file.name;
+
       console.log(`📁 Processing file: ${filePath}`);
 
       // Normalize path separators to /
@@ -129,8 +135,8 @@ const uploadFolder = async (files, parentId, userId) => {
       if (folderPathParts.length > 0) {
         let currentPath = "";
 
-        for (let i = 0; i < folderPathParts.length; i++) {
-          const folderName = folderPathParts[i].trim();
+        for (let j = 0; j < folderPathParts.length; j++) {
+          const folderName = folderPathParts[j].trim();
           currentPath += (currentPath ? "/" : "") + folderName.toLowerCase();
 
           if (!folderMap.has(currentPath)) {
@@ -142,16 +148,8 @@ const uploadFolder = async (files, parentId, userId) => {
               .first();
 
             if (existingFolder) {
-
-              // If this is the root folder of the upload (i === 0), prevents merging
-              if (i === 0) {
-                const error = new Error("FOLDER ALREADY EXIST!");
-                error.statusCode = 409;
-                throw error;
-              }
-
               console.log(
-                `✅ Folder already exists: ${existingFolder.name} (ID: ${existingFolder.id})`
+                `✅ Folder already exists: ${existingFolder.name} (ID: ${existingFolder.id}) - Merging`
               );
               folderMap.set(currentPath, existingFolder.id);
               currentParentId = existingFolder.id;
@@ -170,9 +168,6 @@ const uploadFolder = async (files, parentId, userId) => {
                 });
 
                 folderMap.set(currentPath, folderId);
-                console.log(
-                  `✅ SUCCESS: Created folder: ${folderName} (ID: ${folderId}) in parent ${currentParentId}`
-                );
                 currentParentId = folderId;
               } catch (insertError) {
                 console.error(
@@ -186,6 +181,21 @@ const uploadFolder = async (files, parentId, userId) => {
             currentParentId = folderMap.get(currentPath);
           }
         }
+      }
+
+      // Check if file already exists in the destination folder
+      const existingFile = await trx("files")
+        .where({
+          folder_id: currentParentId,
+          name: fileName,
+          is_deleted: false,
+          created_by: userId
+        })
+        .first();
+
+      if (existingFile) {
+        console.log(`⚠️ File ${fileName} already exists used in folder ${currentParentId}. Skipping.`);
+        continue; // Skip upload for this file
       }
 
       // Upload the file to the correct folder

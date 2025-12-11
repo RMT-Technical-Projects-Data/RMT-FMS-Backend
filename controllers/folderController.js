@@ -299,7 +299,21 @@ const uploadFolderWithFiles = async (req, res, next) => {
 
 
 
-    const uploadedFiles = await uploadFolder(req.files, parent_id, userId);
+    // Extract paths from body (passed as JSON string for reliability)
+    let paths = [];
+    if (req.body.relativePaths) {
+      try {
+        paths = JSON.parse(req.body.relativePaths);
+      } catch (e) {
+        console.error("Error parsing relativePaths:", e);
+        paths = [];
+      }
+    } else if (req.body.paths) {
+      // Fallback for older frontend or if sent as array/string
+      paths = req.body.paths;
+    }
+
+    const uploadedFiles = await uploadFolder(req.files, parent_id, userId, paths);
 
     res.json({
       message: "Folder uploaded successfully with structure preserved",

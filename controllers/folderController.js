@@ -24,6 +24,23 @@ const createfolder = async (req, res, next) => {
     console.log("into the  controller");
 
     const { name, parent_id } = req.body;
+
+    // Check for duplicate folder name in the same directory
+    const duplicateFolder = await knex("folders")
+      .where({
+        name: name,
+        // Handle null parent_id correctly
+        parent_id: parent_id || null
+      })
+      .andWhere("is_deleted", false) // Ignore trash
+      .first();
+
+    if (duplicateFolder) {
+      return res.status(409).json({
+        error: "A folder with this name already exists in this location",
+      });
+    }
+
     req.resourceType = "folder";
     req.resourceId = parent_id || null;
     req.action = "create";
@@ -186,15 +203,23 @@ const updateFolderDetails = async (req, res, next) => {
       });
     }
 
-    // Check for duplicate names (if folder names should be unique)
+    // Check for duplicate names (scoped to the same parent folder)
     const duplicateFolder = await knex("folders")
       .where({ name: trimmedName })
+      .where((builder) => {
+        if (existingFolder.parent_id === null) {
+          builder.whereNull("parent_id");
+        } else {
+          builder.where({ parent_id: existingFolder.parent_id });
+        }
+      })
       .whereNot({ id: folderId })
+      .andWhere("is_deleted", false) // Ignore deleted folders
       .first();
 
     if (duplicateFolder) {
       return res.status(409).json({
-        error: "A folder with this name already exists",
+        error: "A folder with this name already exists in this location",
       });
     }
 
@@ -271,6 +296,8 @@ const uploadFolderWithFiles = async (req, res, next) => {
         size: file.size,
       });
     });
+
+
 
     const uploadedFiles = await uploadFolder(req.files, parent_id, userId);
 
@@ -350,7 +377,7 @@ const downloadFolder = async (req, res, next) => {
         "Content-Disposition",
         `attachment; filename="${folder.name}.zip"`
       );
-console.log("lets check folder name here", folder.name);
+      console.log("lets check folder name here", folder.name);
 
       archive.pipe(res);
       archive.finalize();
@@ -424,7 +451,7 @@ const getFavouriteFoldersController = async (req, res, next) => {
   } catch (err) {
     console.error("Error in getFavouriteFoldersController:", err);
     next(err);
-  }
+  }
 };
 
 const getTrashFoldersController = async (req, res, next) => {

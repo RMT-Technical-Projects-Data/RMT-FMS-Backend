@@ -91,16 +91,31 @@ app.use((req, res, next) => {
   next(createError(404));
 });
 
-// Error handler
+// Custom error middleware (Must be before generic error handler)
+app.use(errorMiddleware);
+
+// Error handler (Legacy/Fallback)
 app.use((err, req, res, next) => {
+  // If headers already sent, delegate to default express handler
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  // If validation/API error handled by middleware, it won't reach here.
+  // This block is for unhandled errors or view rendering.
   res.locals.message = err.message;
   res.locals.error = req.app.get("env") === "development" ? err : {};
+
+  // Return JSON for API routes if not handled
+  if (req.path.startsWith('/api')) {
+    return res.status(err.status || 500).json({
+      error: err.message || "Internal Server Error"
+    });
+  }
+
   res.status(err.status || 500);
   res.render("error");
 });
-
-// Custom error middleware
-app.use(errorMiddleware);
 
 // ---------------------------
 // CRON JOB: Auto-delete trash > 30 days

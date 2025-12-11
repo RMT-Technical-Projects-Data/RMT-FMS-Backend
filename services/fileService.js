@@ -84,9 +84,14 @@ const uploadFolder = async (files, parentId, userId) => {
     throw new Error("User ID is required");
   }
 
-  // Convert parentId to null if it's undefined or empty string
-  const targetParentId =
-    parentId && parentId !== "" ? parseInt(parentId) : null;
+  // Convert parentId to null if it's undefined, empty string, or "null" string
+  let targetParentId = null;
+  if (parentId !== undefined && parentId !== null && parentId !== "" && parentId !== "null") {
+    const parsed = parseInt(parentId);
+    if (!isNaN(parsed)) {
+      targetParentId = parsed;
+    }
+  }
   console.log("Target parent ID:", targetParentId);
 
   // Verify user exists
@@ -98,6 +103,7 @@ const uploadFolder = async (files, parentId, userId) => {
 
   const uploadedFiles = [];
   const folderMap = new Map(); // Map to store created folder IDs by path
+  const trx = await knex.transaction();
 
   try {
     console.log("🔍 Starting folder upload process...");
@@ -109,15 +115,13 @@ const uploadFolder = async (files, parentId, userId) => {
         file.webkitRelativePath || file.originalname || file.name;
       console.log(`📁 Processing file: ${filePath}`);
 
-      const pathParts = filePath.split("/").filter((part) => part.length > 0);
-      console.log(`📁 Path parts:`, pathParts);
+      // Normalize path separators to /
+      const normalizedPath = filePath.replace(/\\/g, '/');
+      const pathParts = normalizedPath.split("/").filter((part) => part.trim().length > 0);
 
       // Get folder path (everything except the last part which is the filename)
       const folderPathParts = pathParts.slice(0, -1);
       const fileName = pathParts[pathParts.length - 1];
-
-      console.log(`📁 Folder path parts:`, folderPathParts);
-      console.log(`📄 File name:`, fileName);
 
       let currentParentId = targetParentId;
 
@@ -126,31 +130,39 @@ const uploadFolder = async (files, parentId, userId) => {
         let currentPath = "";
 
         for (let i = 0; i < folderPathParts.length; i++) {
-          currentPath += (currentPath ? "/" : "") + folderPathParts[i];
-          console.log(
-            `📁 Processing folder: ${folderPathParts[i]}, current path: ${currentPath}`
-          );
+          const folderName = folderPathParts[i].trim();
+          currentPath += (currentPath ? "/" : "") + folderName.toLowerCase();
 
           if (!folderMap.has(currentPath)) {
-            // Check if folder already exists in database
-            const existingFolder = await knex("folders")
-              .where({ name: folderPathParts[i], parent_id: currentParentId })
+            // Check if folder already exists in database (Case Insensitive)
+            const existingFolder = await trx("folders")
+              .where({ parent_id: currentParentId })
+              .andWhereRaw('LOWER(name) = ?', [folderName.toLowerCase()])
+              .andWhere("is_deleted", false)
               .first();
 
             if (existingFolder) {
+
+              // If this is the root folder of the upload (i === 0), prevents merging
+              if (i === 0) {
+                const error = new Error("FOLDER ALREADY EXIST!");
+                error.statusCode = 409;
+                throw error;
+              }
+
               console.log(
-                `✅ Folder already exists: ${folderPathParts[i]} (ID: ${existingFolder.id})`
+                `✅ Folder already exists: ${existingFolder.name} (ID: ${existingFolder.id})`
               );
               folderMap.set(currentPath, existingFolder.id);
               currentParentId = existingFolder.id;
             } else {
               // Create this folder
               console.log(
-                `🔨 Creating folder: ${folderPathParts[i]} with parent_id: ${currentParentId}`
+                `🔨 Creating folder: ${folderName} with parent_id: ${currentParentId}`
               );
               try {
-                const [folderId] = await knex("folders").insert({
-                  name: folderPathParts[i], // Use original folder name
+                const [folderId] = await trx("folders").insert({
+                  name: folderName, // Use original casing
                   parent_id: currentParentId,
                   created_by: userId,
                   created_at: new Date(),
@@ -159,12 +171,12 @@ const uploadFolder = async (files, parentId, userId) => {
 
                 folderMap.set(currentPath, folderId);
                 console.log(
-                  `✅ SUCCESS: Created folder: ${folderPathParts[i]} (ID: ${folderId}) in parent ${currentParentId}`
+                  `✅ SUCCESS: Created folder: ${folderName} (ID: ${folderId}) in parent ${currentParentId}`
                 );
                 currentParentId = folderId;
               } catch (insertError) {
                 console.error(
-                  `❌ ERROR creating folder ${folderPathParts[i]}:`,
+                  `❌ ERROR creating folder ${folderName}:`,
                   insertError
                 );
                 throw insertError;
@@ -172,9 +184,6 @@ const uploadFolder = async (files, parentId, userId) => {
             }
           } else {
             currentParentId = folderMap.get(currentPath);
-            console.log(
-              `✅ Using existing folder: ${folderPathParts[i]} (ID: ${currentParentId})`
-            );
           }
         }
       }
@@ -182,13 +191,10 @@ const uploadFolder = async (files, parentId, userId) => {
       // Upload the file to the correct folder
       const fileUrl = `/api/files/${file.filename}/download`;
 
-      console.log(
-        `📄 Uploading file: ${fileName} to folder ${currentParentId}`
-      );
       try {
-        const [fileId] = await knex("files").insert({
-          name: fileName, // Use the filename from the path
-          original_name: file.originalname || file.name, // Keep original name
+        const [fileId] = await trx("files").insert({
+          name: fileName,
+          original_name: file.originalname || file.name,
           folder_id: currentParentId,
           file_path: file.path,
           file_url: fileUrl,
@@ -201,31 +207,27 @@ const uploadFolder = async (files, parentId, userId) => {
 
         uploadedFiles.push({
           id: fileId,
-          name: fileName, // Use the filename from the path
+          name: fileName,
           url: `/api/files/${fileId}/download`,
           size: file.size,
           mime_type: file.mimetype,
           folder_id: currentParentId,
         });
-
-        console.log(
-          `✅ SUCCESS: Uploaded file: ${fileName} (ID: ${fileId}) to folder ${currentParentId}`
-        );
       } catch (fileError) {
         console.error(`❌ ERROR uploading file ${fileName}:`, fileError);
         throw fileError;
       }
     }
 
+    await trx.commit();
     console.log(
-      `✅ UPLOAD COMPLETED: Successfully uploaded ${uploadedFiles.length} files with nested folder structure`
+      `✅ UPLOAD COMPLETED: Successfully uploaded ${uploadedFiles.length} files`
     );
-    console.log("✅ Created folders:", Array.from(folderMap.entries()));
-
     return uploadedFiles;
+
   } catch (error) {
     console.error("❌ UPLOAD ERROR in uploadFolder:", error);
-    console.error("❌ Error details:", error.message);
+    await trx.rollback();
     throw error;
   }
 };

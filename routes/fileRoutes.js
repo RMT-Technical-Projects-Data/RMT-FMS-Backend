@@ -164,7 +164,7 @@ router.get("/open/:id/url", authMiddleware, async (req, res) => {
   const tempToken = jwt.sign({ fileId, userId }, process.env.JWT_SECRET);
 
   // Use env var or default to localhost
-  const baseUrl = process.env.API_BASE_URL || "http://localhost:3000/api";
+  const baseUrl = "https://rmtfms.duckdns.org/api";
   const openUrl = `${baseUrl}/files/open/direct/${fileId}?token=${tempToken}`;
   res.json({ url: openUrl });
 });

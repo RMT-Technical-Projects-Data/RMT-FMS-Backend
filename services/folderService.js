@@ -23,6 +23,7 @@ const ensureFolderPath = async (folderPath, parentId, userId) => {
         name: folderName,
         parent_id: currentParentId,
       })
+      .andWhere("is_deleted", false)
       .first();
 
     // Create folder if it doesn't exist
@@ -492,8 +493,7 @@ const permanentDeleteFolder = async (folderId) => {
   // Get all child folders
   const childFolders = await knex("folders")
     .where({ parent_id: folderId })
-    .andWhere("is_deleted", true)
-    .select("id");
+    .select("id"); // Removed .andWhere("is_deleted", true)
 
   // Permanently delete all child folders recursively
   for (const child of childFolders) {
@@ -503,8 +503,7 @@ const permanentDeleteFolder = async (folderId) => {
   // Permanently delete all files in this folder
   const files = await knex("files")
     .where({ folder_id: folderId })
-    .andWhere("is_deleted", true)
-    .select("*");
+    .select("*"); // Removed .andWhere("is_deleted", true)
 
   for (const file of files) {
     // Delete physical file
@@ -517,8 +516,7 @@ const permanentDeleteFolder = async (folderId) => {
   // Delete file records
   await knex("files")
     .where({ folder_id: folderId })
-    .andWhere("is_deleted", true)
-    .del();
+    .del(); // Removed .andWhere("is_deleted", true)
 
   // Construct the full folder path BEFORE deleting the folder record
   const getFolderPath = async (folderId) => {

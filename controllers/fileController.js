@@ -79,6 +79,7 @@ async function ensureFolderStructure(folderParts, createdBy, parentId = null) {
         parent_id: currentParentId,
         created_by: createdBy,
       })
+      .andWhere("is_deleted", false) // Ignore trash folders
       .first();
 
     if (!existingFolder) {

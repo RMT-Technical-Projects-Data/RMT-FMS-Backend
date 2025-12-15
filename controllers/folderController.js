@@ -475,6 +475,9 @@ const restoreFolderController = async (req, res, next) => {
     const result = await restoreFolder(folderId);
     res.json(result);
   } catch (err) {
+    if (err.message.includes("already exists")) {
+      return res.status(409).json({ error: err.message });
+    }
     console.error("Error in restoreFolderController:", err);
     next(err);
   }

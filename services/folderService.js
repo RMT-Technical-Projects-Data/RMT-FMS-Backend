@@ -458,6 +458,24 @@ const getTrashFolders = async (userId, parentId = null) => {
 };
 
 const restoreFolder = async (folderId) => {
+  // Get folder info first
+  const folder = await knex("folders").where({ id: folderId }).first();
+  if (!folder) throw new Error("Folder not found");
+
+  // Check if a folder with the same name already exists in the same directory (and is NOT deleted)
+  const duplicate = await knex("folders")
+    .where({
+      name: folder.name,
+      parent_id: folder.parent_id,
+      created_by: folder.created_by // Ensure we check within user's scope if needed, or just generally
+    })
+    .andWhere("is_deleted", false)
+    .first();
+
+  if (duplicate) {
+    throw new Error(`Folder with name '${folder.name}' already exists in the directory.`);
+  }
+
   // Restore folder and all its children recursively
   await knex("folders")
     .where({ id: folderId })

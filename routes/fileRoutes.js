@@ -163,7 +163,9 @@ router.get("/open/:id/url", authMiddleware, async (req, res) => {
   // Generate short-lived signed token (valid 1 minute)
   const tempToken = jwt.sign({ fileId, userId }, process.env.JWT_SECRET);
 
-  const openUrl = `https://rmtfms.duckdns.org/api/files/open/direct/${fileId}?token=${tempToken}`;
+  // Use env var or default to localhost
+  const baseUrl = process.env.API_BASE_URL || "http://localhost:3000/api";
+  const openUrl = `${baseUrl}/files/open/direct/${fileId}?token=${tempToken}`;
   res.json({ url: openUrl });
 });
 router.get("/open/direct/:id", async (req, res) => {
@@ -178,19 +180,44 @@ router.get("/open/direct/:id", async (req, res) => {
       return res.status(403).json({ error: "Invalid token for this file" });
 
     const file = await db("files").where({ id: fileId }).first();
-    if (!file || !fs.existsSync(file.file_path))
+
+    if (!file) return res.status(404).json({ error: "File not found" });
+
+    // Robust path resolution (copied from fileController)
+    let filePath = file.file_path;
+
+    // 1. Try exact path
+    if (filePath && !fs.existsSync(filePath)) {
+      // 2. Try resolving relative to CWD
+      const relativePath = path.resolve(filePath);
+      if (fs.existsSync(relativePath)) {
+        filePath = relativePath;
+      } else {
+        // 3. Try resolving 'uploads' relative to CWD if path starts with it
+        if (filePath.includes("uploads")) {
+          const uploadsIndex = filePath.indexOf("uploads");
+          const partAfterUploads = filePath.substring(uploadsIndex);
+          const resolvedUploads = path.join(process.cwd(), partAfterUploads);
+          if (fs.existsSync(resolvedUploads)) {
+            filePath = resolvedUploads;
+          }
+        }
+      }
+    }
+
+    if (!filePath || !fs.existsSync(filePath))
       return res.status(404).json({ error: "File not found" });
 
     const mime = require("mime-types");
     const mimeType =
       file.mime_type ||
-      mime.lookup(file.file_path) ||
+      mime.lookup(filePath) ||
       "application/octet-stream";
 
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
 
-    fs.createReadStream(file.file_path).pipe(res);
+    fs.createReadStream(filePath).pipe(res);
   } catch (err) {
     console.error("❌ [open/direct] Error:", err);
     return res.status(401).json({ error: "Invalid or expired link" });

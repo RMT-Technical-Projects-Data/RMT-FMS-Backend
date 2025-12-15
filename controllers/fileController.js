@@ -393,7 +393,30 @@ const openFile = async (req, res, next) => {
       return res.status(404).json({ error: "File not found" });
     }
 
-    if (!file.file_path || !fs.existsSync(file.file_path)) {
+    // Check if file exists in local storage
+    let filePath = file.file_path;
+    const fs = require("fs");
+
+    // 1. Try exact path
+    if (filePath && !fs.existsSync(filePath)) {
+      // 2. Try resolving relative to CWD
+      const relativePath = path.resolve(filePath);
+      if (fs.existsSync(relativePath)) {
+        filePath = relativePath;
+      } else {
+        // 3. Try resolving 'uploads' relative to CWD if path starts with it
+        if (filePath.includes("uploads")) {
+          const uploadsIndex = filePath.indexOf("uploads");
+          const partAfterUploads = filePath.substring(uploadsIndex);
+          const resolvedUploads = path.join(process.cwd(), partAfterUploads);
+          if (fs.existsSync(resolvedUploads)) {
+            filePath = resolvedUploads;
+          }
+        }
+      }
+    }
+
+    if (!filePath || !fs.existsSync(filePath)) {
       console.log(
         `❌ [openFile] File missing on server - Path: ${file.file_path}`
       );
@@ -402,7 +425,7 @@ const openFile = async (req, res, next) => {
 
     const mimeType =
       file.mime_type ||
-      mime.lookup(file.file_path) ||
+      mime.lookup(filePath) ||
       "application/octet-stream";
 
     console.log(`✅ [openFile] Streaming file inline - MIME: ${mimeType}`);
@@ -413,7 +436,7 @@ const openFile = async (req, res, next) => {
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
 
-    const fileStream = fs.createReadStream(file.file_path);
+    const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
   } catch (err) {
     console.error("❌ [openFile] Error:", err);

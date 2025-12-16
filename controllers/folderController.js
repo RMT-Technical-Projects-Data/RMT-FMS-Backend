@@ -113,7 +113,13 @@ const getFolders = async (req, res, next) => {
       }
     } else {
       // Default dashboard context
-      userFolders = await getUserFolders(userId);
+      const userRole = req.user.role ? req.user.role.toLowerCase().trim() : "";
+
+      if (userRole === 'super_admin') {
+        userFolders = await knex("folders").where("is_deleted", false);
+      } else {
+        userFolders = await getUserFolders(userId);
+      }
 
       // Filter by parent_id if specified
       if (parent_id) {
@@ -125,7 +131,11 @@ const getFolders = async (req, res, next) => {
 
     // Get folders user has permission to access (only for dashboard context)
     let permissionFolders = [];
-    if (context !== "favourites") {
+
+    // Check role again (reuse variable if scoped correctly, or re-derive)
+    const userRoleScope = req.user.role ? req.user.role.toLowerCase().trim() : "";
+
+    if (context !== "favourites" && userRoleScope !== 'super_admin') {
       const permissionQuery = knex("folders")
         .join("permissions", function () {
           this.on("folders.id", "=", "permissions.resource_id").andOn(

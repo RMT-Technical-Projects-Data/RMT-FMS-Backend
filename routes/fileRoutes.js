@@ -275,6 +275,20 @@ router.get("/root", authMiddleware, async (req, res, next) => {
     const userId = req.user.id;
 
     // Get root files created by user
+    const userRole = req.user.role ? req.user.role.toLowerCase().trim() : "";
+
+    // Explicitly simple query for Super Admin
+    if (userRole === "super_admin") {
+      const allRootFiles = await db("files")
+        .whereNull("folder_id")
+        .andWhere("is_deleted", false)
+        .select("*")
+        .orderBy("created_at", "desc");
+
+      const filesWithFav = allRootFiles.map(f => ({ ...f, favourited: false }));
+      return res.json({ files: filesWithFav });
+    }
+
     const userFiles = await db("files")
       .leftJoin("user_favourite_files", function () {
         this.on("files.id", "=", "user_favourite_files.file_id").andOn(

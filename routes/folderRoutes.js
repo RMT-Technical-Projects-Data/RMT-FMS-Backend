@@ -32,7 +32,24 @@ router.get("/root", authMiddleware, async (req, res, next) => {
     const userId = req.user.id;
 
     // 1. Get root folders created by user (for display)
-    const userFolders = await db("folders")
+    let userFolders;
+    const userRole = req.user.role ? req.user.role.toLowerCase().trim() : "";
+
+    if (userRole === "super_admin") {
+      // Super Admin: Get ALL root folders (ignoring created_by)
+      // This ensures all super admins see the same global view
+      const allRootFolders = await db("folders")
+        .whereNull("parent_id")
+        .andWhere("is_deleted", false)
+        .select("*")
+        .orderBy("created_at", "desc");
+
+      const foldersWithFav = allRootFolders.map(f => ({ ...f, favourited: false }));
+      return res.json({ folders: foldersWithFav });
+    }
+
+    // Normal User: Get own root folders
+    userFolders = await db("folders")
       .leftJoin("user_favourite_folders", function () {
         this.on("folders.id", "=", "user_favourite_folders.folder_id")
           .andOn("user_favourite_folders.user_id", "=", userId);

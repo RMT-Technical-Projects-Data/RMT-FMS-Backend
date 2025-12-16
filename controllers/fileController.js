@@ -520,7 +520,20 @@ const getFiles = async (req, res, next) => {
       }
     } else {
       // === DEFAULT DASHBOARD CONTEXT ===
-      userFiles = await getUserFiles(userId, folder_id);
+      const userRole = req.user.role ? req.user.role.toLowerCase().trim() : "";
+
+      if (userRole === 'super_admin') {
+        let query = knex("files").where("is_deleted", false);
+
+        if (folder_id && folder_id !== "null" && folder_id !== "undefined") {
+          query.where("folder_id", folder_id);
+        } else {
+          query.whereNull("folder_id");
+        }
+        userFiles = await query.select("*").orderBy("created_at", "desc");
+      } else {
+        userFiles = await getUserFiles(userId, folder_id);
+      }
 
       // Include files user has permission to access
       const permissionQuery = knex("files")

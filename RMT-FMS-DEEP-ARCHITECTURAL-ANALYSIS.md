@@ -595,7 +595,7 @@ const FileList = React.memo<FileListProps>(({ files, ...props }) => {
 
 // Callback memoization
 const handleFileClick = useCallback((file: File) => {
-  const fileUrl = `http://localhost:3000/api/files/download/${file.id}`;
+  const fileUrl = `https://rmtfms.duckdns.org/api/files/download/${file.id}`;
   window.open(fileUrl, '_blank');
 }, []);
 ```

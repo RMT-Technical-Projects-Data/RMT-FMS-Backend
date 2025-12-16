@@ -331,15 +331,42 @@ const downloadFile = async (req, res, next) => {
       return res.status(404).json({ error: "File path not found" });
     }
 
-    if (!require("fs").existsSync(file.file_path)) {
+    const path = require("path");
+    const fs = require("fs");
+
+    // Robust path resolution logic
+    let filePath = file.file_path;
+
+    // 1. Try exact path
+    if (filePath && !fs.existsSync(filePath)) {
+      // 2. Try resolving relative to CWD
+      const relativePath = path.resolve(filePath);
+      if (fs.existsSync(relativePath)) {
+        filePath = relativePath;
+      } else {
+        // 3. Try resolving 'uploads' relative to CWD if path starts with it
+        // Handle both forward slashes and backslashes for cross-platform compatibility
+        const normalizedPath = filePath.replace(/\\/g, "/");
+        if (normalizedPath.includes("uploads")) {
+          const uploadsIndex = normalizedPath.indexOf("uploads");
+          const partAfterUploads = normalizedPath.substring(uploadsIndex);
+          const resolvedUploads = path.join(process.cwd(), partAfterUploads);
+          if (fs.existsSync(resolvedUploads)) {
+            filePath = resolvedUploads;
+          }
+        }
+      }
+    }
+
+    if (!fs.existsSync(filePath)) {
       console.log(
-        `❌ [downloadFile] File does not exist on server - Path: ${file.file_path}`
+        `❌ [downloadFile] File does not exist on server - Path: ${file.file_path} (Resolved: ${filePath})`
       );
       return res.status(404).json({ error: "File not found on server" });
     }
 
     console.log(
-      `✅ [downloadFile] File found, streaming - Path: ${file.file_path}`
+      `✅ [downloadFile] File found, streaming - Path: ${filePath}`
     );
 
     // Set appropriate headers for download
@@ -347,7 +374,7 @@ const downloadFile = async (req, res, next) => {
     res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
     // Stream the file
-    const fileStream = require("fs").createReadStream(file.file_path);
+    const fileStream = fs.createReadStream(filePath);
     fileStream.pipe(res);
   } catch (err) {
     console.error("❌ [downloadFile] Error:", err);

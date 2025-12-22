@@ -163,8 +163,10 @@ router.get("/open/:id/url", authMiddleware, async (req, res) => {
   // Generate short-lived signed token (valid 1 minute)
   const tempToken = jwt.sign({ fileId, userId }, process.env.JWT_SECRET);
 
-  // Use env var or default to localhost
-  const baseUrl = "https://rmtfms.duckdns.org/api";
+  // Use dynamic host to support both localhost and production
+  const protocol = req.protocol;
+  const host = req.get('host');
+  const baseUrl = `${protocol}://${host}/api`;
   const openUrl = `${baseUrl}/files/open/direct/${fileId}?token=${tempToken}`;
   res.json({ url: openUrl });
 });
@@ -184,25 +186,42 @@ router.get("/open/direct/:id", async (req, res) => {
     if (!file) return res.status(404).json({ error: "File not found" });
 
     // Robust path resolution (copied from fileController)
-    let filePath = file.file_path;
+    // Robust path resolution strategy
+    let filePath = null;
+    const candidates = [];
 
-    // 1. Try exact path
-    if (filePath && !fs.existsSync(filePath)) {
+    if (file.file_path) {
+      // 1. Try exact path stored in DB
+      candidates.push(file.file_path);
+
       // 2. Try resolving relative to CWD
-      const relativePath = path.resolve(filePath);
-      if (fs.existsSync(relativePath)) {
-        filePath = relativePath;
+      candidates.push(path.resolve(process.cwd(), file.file_path));
+
+      // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
+      const normalized = file.file_path.replace(/\\/g, '/');
+      const uploadIndex = normalized.indexOf('uploads/');
+
+      if (uploadIndex !== -1) {
+        const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
+        candidates.push(path.join(process.cwd(), suffix));
+        candidates.push(path.join(__dirname, '..', suffix));
       } else {
-        // 3. Try resolving 'uploads' relative to CWD if path starts with it
-        if (filePath.includes("uploads")) {
-          const uploadsIndex = filePath.indexOf("uploads");
-          const partAfterUploads = filePath.substring(uploadsIndex);
-          const resolvedUploads = path.join(process.cwd(), partAfterUploads);
-          if (fs.existsSync(resolvedUploads)) {
-            filePath = resolvedUploads;
-          }
-        }
+        // If path doesn't contain 'uploads', try prepending it (legacy data)
+        candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
       }
+    }
+
+    // Check all candidates
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        filePath = p;
+        break;
+      }
+    }
+
+    if (!filePath) {
+      console.error(`❌ [open/direct] File not found. Checked candidates:`, candidates);
+      return res.status(404).json({ error: "File not found on server" });
     }
 
     if (!filePath || !fs.existsSync(filePath))

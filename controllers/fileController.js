@@ -334,28 +334,42 @@ const downloadFile = async (req, res, next) => {
     const path = require("path");
     const fs = require("fs");
 
-    // Robust path resolution logic
-    let filePath = file.file_path;
+    // Robust path resolution strategy (Standardized)
+    let filePath = null;
+    const candidates = [];
 
-    // 1. Try exact path
-    if (filePath && !fs.existsSync(filePath)) {
+    if (file.file_path) {
+      // 1. Try exact path stored in DB
+      candidates.push(file.file_path);
+
       // 2. Try resolving relative to CWD
-      const relativePath = path.resolve(filePath);
-      if (fs.existsSync(relativePath)) {
-        filePath = relativePath;
+      candidates.push(path.resolve(process.cwd(), file.file_path));
+
+      // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
+      const normalized = file.file_path.replace(/\\/g, '/');
+      const uploadIndex = normalized.indexOf('uploads/');
+
+      if (uploadIndex !== -1) {
+        const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
+        candidates.push(path.join(process.cwd(), suffix));
+        candidates.push(path.join(__dirname, '..', suffix));
       } else {
-        // 3. Try resolving 'uploads' relative to CWD if path starts with it
-        // Handle both forward slashes and backslashes for cross-platform compatibility
-        const normalizedPath = filePath.replace(/\\/g, "/");
-        if (normalizedPath.includes("uploads")) {
-          const uploadsIndex = normalizedPath.indexOf("uploads");
-          const partAfterUploads = normalizedPath.substring(uploadsIndex);
-          const resolvedUploads = path.join(process.cwd(), partAfterUploads);
-          if (fs.existsSync(resolvedUploads)) {
-            filePath = resolvedUploads;
-          }
-        }
+        // If path doesn't contain 'uploads', try prepending it (legacy data)
+        candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
       }
+    }
+
+    // Check all candidates
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        filePath = p;
+        break;
+      }
+    }
+
+    if (!filePath) {
+      console.error(`❌ [downloadFile] File not found. Checked candidates:`, candidates);
+      return res.status(404).json({ error: "File not found on server" });
     }
 
     if (!fs.existsSync(filePath)) {
@@ -420,27 +434,36 @@ const openFile = async (req, res, next) => {
       return res.status(404).json({ error: "File not found" });
     }
 
-    // Check if file exists in local storage
-    let filePath = file.file_path;
-    const fs = require("fs");
+    // Robust path resolution strategy (Standardized)
+    let filePath = null;
+    const candidates = [];
 
-    // 1. Try exact path
-    if (filePath && !fs.existsSync(filePath)) {
-      // 2. Try resolving relative to CWD
-      const relativePath = path.resolve(filePath);
-      if (fs.existsSync(relativePath)) {
-        filePath = relativePath;
+    if (file.file_path) {
+      candidates.push(file.file_path);
+      candidates.push(path.resolve(process.cwd(), file.file_path));
+
+      const normalized = file.file_path.replace(/\\/g, '/');
+      const uploadIndex = normalized.indexOf('uploads/');
+
+      if (uploadIndex !== -1) {
+        const suffix = normalized.substring(uploadIndex);
+        candidates.push(path.join(process.cwd(), suffix));
+        candidates.push(path.join(__dirname, '..', suffix));
       } else {
-        // 3. Try resolving 'uploads' relative to CWD if path starts with it
-        if (filePath.includes("uploads")) {
-          const uploadsIndex = filePath.indexOf("uploads");
-          const partAfterUploads = filePath.substring(uploadsIndex);
-          const resolvedUploads = path.join(process.cwd(), partAfterUploads);
-          if (fs.existsSync(resolvedUploads)) {
-            filePath = resolvedUploads;
-          }
-        }
+        candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
       }
+    }
+
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        filePath = p;
+        break;
+      }
+    }
+
+    if (!filePath) {
+      console.error(`❌ [openFile] File not found. Checked candidates:`, candidates);
+      return res.status(404).json({ error: "File not found on server" });
     }
 
     if (!filePath || !fs.existsSync(filePath)) {

@@ -154,6 +154,23 @@ router.delete("/users/:id", authMiddleware, async (req, res, next) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // Safe Deletion: Unlink resources first
+    // 1. Unlink files (keep them, but remove user association)
+    await db("files")
+      .where({ created_by: id })
+      .update({ created_by: null });
+
+    // 2. Unlink folders (keep them, but remove user association)
+    await db("folders")
+      .where({ created_by: id })
+      .update({ created_by: null });
+
+    // 3. Remove permissions (user is gone, so are their rights)
+    await db("permissions")
+      .where({ user_id: id })
+      .delete();
+
+    // 4. Finally delete the user
     await db("users").where({ id }).delete();
 
     res.json({ message: "User deleted successfully" });

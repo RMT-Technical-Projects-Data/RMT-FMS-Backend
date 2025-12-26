@@ -524,10 +524,26 @@ const permanentDeleteFolder = async (folderId) => {
     .select("*"); // Removed .andWhere("is_deleted", true)
 
   for (const file of files) {
-    // Delete physical file
-    const fs = require("fs");
-    if (file.file_path && fs.existsSync(file.file_path)) {
-      fs.unlinkSync(file.file_path);
+    // Check if any other file uses the same path
+    const otherFiles = await knex("files")
+      .where({ file_path: file.file_path })
+      .whereNot({ id: file.id })
+      .first();
+
+    // Delete physical file ONLY if no other references exist
+    if (!otherFiles) {
+      const fs = require("fs");
+      if (file.file_path && fs.existsSync(file.file_path)) {
+        try {
+          fs.unlinkSync(file.file_path);
+        } catch (err) {
+          console.error("Error deleting physical file:", err);
+        }
+      }
+    } else {
+      console.log(
+        `ℹ️ Skipping physical file deletion for ${file.id} because it is shared by other files.`
+      );
     }
   }
 
@@ -566,13 +582,22 @@ const permanentDeleteFolder = async (folderId) => {
   // Delete folder record
   await knex("folders").where({ id: folderId }).del();
 
-  // Remove physical folder directory from uploads folder
+  // Remove physical folder directory from uploads folder safely
+  // We DO NOT use recursive force delete here anymore to avoid deleting shared content
+  // Instead we rely on cleanupAllEmptyDirectories below
   if (folderPath && fs.existsSync(folderPath)) {
+    console.log(`ℹ️ Checking if folder directory needs cleanup: ${folderPath}`);
+    // Attempt to remove ONLY if empty (fs.rmdirSync throws if not empty)
     try {
-      fs.rmSync(folderPath, { recursive: true, force: true });
-      console.log(`🗑️ Removed physical folder directory: ${folderPath}`);
+      const dirContents = fs.readdirSync(folderPath);
+      if (dirContents.length === 0) {
+        fs.rmdirSync(folderPath);
+        console.log(`🗑️ Removed empty folder directory: ${folderPath}`);
+      } else {
+        console.log(`ℹ️ Folder directory not empty (likely shared), keeping: ${folderPath}`);
+      }
     } catch (error) {
-      console.error(`❌ Error removing folder directory ${folderPath}:`, error);
+      console.error(`Error checking/removing directory ${folderPath}:`, error);
     }
   } else {
     console.log(`ℹ️ Folder path not found or doesn't exist: ${folderPath}`);

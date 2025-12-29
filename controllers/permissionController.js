@@ -72,7 +72,7 @@ const assignPermission = async (req, res, next) => {
       // Get all child folders
       const childFolders = await db("folders").where({ parent_id: parentFolderId });
       console.log(`📁 Found ${childFolders.length} child folders for parent ${parentFolderId}`);
-      
+
       for (const childFolder of childFolders) {
         console.log(`🔄 Processing child folder: ${childFolder.name} (ID: ${childFolder.id})`);
         // Check if permission already exists for this child folder
@@ -113,7 +113,7 @@ const assignPermission = async (req, res, next) => {
       // Get all files in this folder
       const childFiles = await db("files").where({ folder_id: parentFolderId });
       console.log(`📄 Found ${childFiles.length} child files for parent ${parentFolderId}`);
-      
+
       for (const childFile of childFiles) {
         console.log(`🔄 Processing child file: ${childFile.name} (ID: ${childFile.id})`);
         // Check if permission already exists for this file
@@ -199,6 +199,55 @@ const removePermission = async (req, res, next) => {
   try {
     const { permission_id } = req.body;
 
+    // Get the permission details before deleting to know if we need to cascade
+    const permission = await db("permissions").where({ id: permission_id }).first();
+
+    if (!permission) {
+      return res.status(404).json({ message: "Permission not found" });
+    }
+
+    const { user_id, resource_id, resource_type } = permission;
+
+    // Helper function to remove inheritance from children
+    const removeInheritanceFromChildren = async (parentFolderId, userId) => {
+      // Get all child folders
+      const childFolders = await db("folders").where({ parent_id: parentFolderId });
+
+      for (const childFolder of childFolders) {
+        // Remove permission for this child folder
+        await db("permissions")
+          .where({
+            user_id: userId,
+            resource_id: childFolder.id,
+            resource_type: "folder",
+          })
+          .del();
+
+        // Recursively remove from grandchildren
+        await removeInheritanceFromChildren(childFolder.id, userId);
+      }
+
+      // Get all files in this folder
+      const childFiles = await db("files").where({ folder_id: parentFolderId });
+
+      for (const childFile of childFiles) {
+        // Remove permission for this file
+        await db("permissions")
+          .where({
+            user_id: userId,
+            resource_id: childFile.id,
+            resource_type: "file"
+          })
+          .del();
+      }
+    };
+
+    // If it's a folder, remove permissions from all nested content
+    if (resource_type === "folder") {
+      await removeInheritanceFromChildren(resource_id, user_id);
+    }
+
+    // Finally delete the target permission
     await db("permissions").where({ id: permission_id }).del();
 
     res.json({ message: "Permission removed successfully" });

@@ -16,7 +16,39 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
   const trx = await knex.transaction();
 
   try {
-    const fileName = customName || file.originalname;
+    let fileName = customName || file.originalname;
+
+    // Check for duplicates and rename if necessary
+    let checkName = fileName;
+    let counter = 1;
+    let duplicateExists = true;
+
+    while (duplicateExists) {
+      const existingFile = await trx("files")
+        .where({
+          name: checkName,
+          folder_id: folderId || null,
+          created_by: userId,
+          is_deleted: false
+        })
+        .first();
+
+      if (existingFile) {
+        const lastDotIndex = fileName.lastIndexOf(".");
+        if (lastDotIndex !== -1) {
+          const namePart = fileName.substring(0, lastDotIndex);
+          const extPart = fileName.substring(lastDotIndex);
+          checkName = `${namePart} (${counter})${extPart}`;
+        } else {
+          checkName = `${fileName} (${counter})`;
+        }
+        counter++;
+      } else {
+        duplicateExists = false;
+      }
+    }
+
+    fileName = checkName;
 
     // Use the path where multer saved the file
     const filePath = file.path;
@@ -27,7 +59,7 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
 
     // Insert into DB
     const [fileId] = await trx("files").insert({
-      name: file.originalname, // Use original filename for display
+      name: fileName, // Use the (potentially renamed) filename
       original_name: file.originalname,
       folder_id: folderId || null,
       file_path: filePath,
@@ -45,7 +77,7 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
 
     return {
       id: fileId,
-      name: file.originalname, // Use original filename for display
+      name: fileName,
       url: `/api/files/${fileId}/download`,
       size: file.size,
       mime_type: file.mimetype,
@@ -440,6 +472,22 @@ const moveFile = async (fileId, targetFolderIds, userId) => {
       throw new Error("No target folders specified");
     }
 
+    // Check for duplicates in ALL target folders first
+    for (const folderId of targetFolderIds) {
+      const existingFile = await trx("files")
+        .where({
+          folder_id: folderId,
+          name: file.name,
+          is_deleted: false,
+          created_by: userId
+        })
+        .first();
+
+      if (existingFile) {
+        throw new Error("File already exists in directory");
+      }
+    }
+
     // 1. Move to first folder (Update original file)
     const firstFolderId = targetFolderIds[0];
     await trx("files")
@@ -452,6 +500,7 @@ const moveFile = async (fileId, targetFolderIds, userId) => {
     // 2. Copy to other folders (Insert new records pointing to same file)
     for (let i = 1; i < targetFolderIds.length; i++) {
       const folderId = targetFolderIds[i];
+
       await trx("files").insert({
         name: file.name,
         original_name: file.original_name,

@@ -30,9 +30,43 @@ const uploadFiles = async (req, res, next) => {
     try {
       const uploaded = [];
       for (const file of req.files) {
+
+        // --- DUPLICATE CHECK & RENAME START ---
+        let fileName = file.originalname;
+        let checkName = fileName;
+        let counter = 1;
+        let duplicateExists = true;
+
+        while (duplicateExists) {
+          const existingFile = await trx("files")
+            .where({
+              name: checkName,
+              folder_id: folder_id || null,
+              created_by: userId,
+              is_deleted: false
+            })
+            .first();
+
+          if (existingFile) {
+            const lastDotIndex = fileName.lastIndexOf(".");
+            if (lastDotIndex !== -1) {
+              const namePart = fileName.substring(0, lastDotIndex);
+              const extPart = fileName.substring(lastDotIndex);
+              checkName = `${namePart} (${counter})${extPart}`;
+            } else {
+              checkName = `${fileName} (${counter})`;
+            }
+            counter++;
+          } else {
+            duplicateExists = false;
+          }
+        }
+        const finalName = checkName;
+        // --- DUPLICATE CHECK & RENAME END ---
+
         const fileUrl = `/api/files/${file.filename}/download`;
         const [fileId] = await trx("files").insert({
-          name: file.originalname,
+          name: finalName,
           original_name: file.originalname,
           folder_id: folder_id || null,
           file_path: file.path,
@@ -45,7 +79,7 @@ const uploadFiles = async (req, res, next) => {
         });
         uploaded.push({
           id: fileId,
-          name: file.originalname,
+          name: finalName,
           url: `/api/files/${fileId}/download`,
           size: file.size,
           mime_type: file.mimetype,
@@ -201,9 +235,42 @@ const uploadFolderWithFiles = async (req, res) => {
           );
         }
 
+        // --- DUPLICATE CHECK & RENAME START ---
+        let finalName = fileName;
+        let checkName = fileName;
+        let counter = 1;
+        let duplicateExists = true;
+
+        while (duplicateExists) {
+          const existingFile = await knex("files")
+            .where({
+              name: checkName,
+              folder_id: folderId, // Use the resolved folderId
+              created_by: userId,
+              is_deleted: false
+            })
+            .first();
+
+          if (existingFile) {
+            const lastDotIndex = fileName.lastIndexOf(".");
+            if (lastDotIndex !== -1) {
+              const namePart = fileName.substring(0, lastDotIndex);
+              const extPart = fileName.substring(lastDotIndex);
+              checkName = `${namePart} (${counter})${extPart}`;
+            } else {
+              checkName = `${fileName} (${counter})`;
+            }
+            counter++;
+          } else {
+            duplicateExists = false;
+          }
+        }
+        finalName = checkName;
+        // --- DUPLICATE CHECK & RENAME END ---
+
         // Build correct save path
         const localDir = path.join("uploads", ...folderParts);
-        const finalPath = path.join(localDir, fileName);
+        const finalPath = path.join(localDir, finalName);
 
         // Ensure directory exists (should already exist from step 1)
         if (!fs.existsSync(localDir)) {
@@ -219,10 +286,10 @@ const uploadFolderWithFiles = async (req, res) => {
         // Save file metadata to DB and get the inserted file
         const [insertedFile] = await knex("files")
           .insert({
-            name: fileName,
+            name: finalName,
             folder_id: folderId,
             file_path: finalPath,
-            file_url: `/uploads/${path.join(...folderParts, fileName)}`,
+            file_url: `/uploads/${path.join(...folderParts, finalName)}`,
             created_by: userId,
             created_at: new Date(),
             updated_at: new Date(),
@@ -700,6 +767,11 @@ const moveFileController = async (req, res, next) => {
     if (err.message === "File not found") {
       console.warn(`⚠️ Move failed: File ${req.params.id} does not exist.`);
       return res.status(404).json({ error: "This file no longer exists. Please refresh the page." });
+    }
+
+    if (err.message === "File already exists in directory") {
+      console.warn(`⚠️ Move failed: Duplicate file in target directory.`);
+      return res.status(409).json({ message: "File already exists in directory" });
     }
 
     // For all other errors, pass to the global error handler

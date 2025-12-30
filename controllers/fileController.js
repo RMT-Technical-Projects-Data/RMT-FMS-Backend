@@ -736,6 +736,9 @@ const restoreFileController = async (req, res, next) => {
     const result = await restoreFile(fileId);
     res.json(result);
   } catch (err) {
+    if (err.message === "File already exists") {
+      return res.status(409).json({ message: "restored failed file already exist" });
+    }
     console.error("Error in restoreFileController:", err);
     next(err);
   }

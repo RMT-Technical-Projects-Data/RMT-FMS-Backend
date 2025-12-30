@@ -455,11 +455,35 @@ const getTrashFiles = async (userId, folderId = null) => {
 };
 
 const restoreFile = async (fileId) => {
-  await knex("files")
-    .where({ id: fileId })
-    .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });
+  const trx = await knex.transaction();
+  try {
+    const file = await trx("files").where({ id: fileId }).first();
+    if (!file) throw new Error("File not found");
 
-  return { id: fileId, restored: true };
+    // Check if a file with the same name already exists in the same directory (active files only)
+    const existingFile = await trx("files")
+      .where({
+        name: file.name,
+        folder_id: file.folder_id,
+        created_by: file.created_by,
+        is_deleted: false,
+      })
+      .first();
+
+    if (existingFile) {
+      throw new Error("File already exists");
+    }
+
+    await trx("files")
+      .where({ id: fileId })
+      .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });
+
+    await trx.commit();
+    return { id: fileId, restored: true };
+  } catch (error) {
+    await trx.rollback();
+    throw error;
+  }
 };
 
 const moveFile = async (fileId, targetFolderIds, userId) => {

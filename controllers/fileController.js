@@ -19,6 +19,9 @@ const {
   permanentDeleteFile,
   moveFile,
 } = require("../services/fileService");
+const { getFileStreamFromS3, uploadFileToS3 } = require("../services/s3Service");
+
+
 const uploadFiles = async (req, res, next) => {
   try {
     const { folder_id } = req.body;
@@ -26,72 +29,46 @@ const uploadFiles = async (req, res, next) => {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: "No files uploaded" });
     }
+
     const trx = await knex.transaction();
     try {
       const uploaded = [];
+      const errors = []; // Initialize errors array
+
       for (const file of req.files) {
-
-        // --- DUPLICATE CHECK & RENAME START ---
-        let fileName = file.originalname;
-        let checkName = fileName;
-        let counter = 1;
-        let duplicateExists = true;
-
-        while (duplicateExists) {
-          const existingFile = await trx("files")
-            .where({
-              name: checkName,
-              folder_id: folder_id || null,
-              created_by: userId,
-              is_deleted: false
-            })
-            .first();
-
-          if (existingFile) {
-            const lastDotIndex = fileName.lastIndexOf(".");
-            if (lastDotIndex !== -1) {
-              const namePart = fileName.substring(0, lastDotIndex);
-              const extPart = fileName.substring(lastDotIndex);
-              checkName = `${namePart} (${counter})${extPart}`;
-            } else {
-              checkName = `${fileName} (${counter})`;
-            }
-            counter++;
-          } else {
-            duplicateExists = false;
-          }
+        try {
+          // Use the service layer (which uses S3)
+          // Note: uploadFile takes (file, folderId, userId)
+          const result = await uploadFile(file, folder_id, userId);
+          uploaded.push(result);
+        } catch (fileError) {
+          console.error(`❌ [Bulk Upload] Error uploading file ${file.originalname}:`, fileError);
+          errors.push({
+            filename: file.originalname,
+            error: fileError.message
+          });
         }
-        const finalName = checkName;
-        // --- DUPLICATE CHECK & RENAME END ---
-
-        const fileUrl = `/api/files/${file.filename}/download`;
-        const [fileId] = await trx("files").insert({
-          name: finalName,
-          original_name: file.originalname,
-          folder_id: folder_id || null,
-          file_path: file.path,
-          file_url: fileUrl,
-          mime_type: file.mimetype,
-          size: file.size,
-          created_by: userId,
-          created_at: new Date(),
-          updated_at: new Date(),
-        });
-        uploaded.push({
-          id: fileId,
-          name: finalName,
-          url: `/api/files/${fileId}/download`,
-          size: file.size,
-          mime_type: file.mimetype,
-        });
       }
       await trx.commit();
-      res.json({ message: "Files uploaded successfully", files: uploaded });
+
+      console.log(`✅ [Bulk Upload] Successfully uploaded ${uploaded.length} files`);
+      if (errors.length > 0) {
+        console.warn(`⚠️ [Bulk Upload] ${errors.length} files failed to upload`);
+      }
+
+      res.json({
+        message: "Files processed",
+        files: uploaded,
+        errors: errors.length > 0 ? errors : undefined
+      });
     } catch (err) {
       await trx.rollback();
       console.error("DB insert error:", err);
+      // cleanup handled by service mostly, but if we crashed here, Multer files might be left
       req.files.forEach((file) => {
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        if (fs.existsSync(file.path)) {
+          try { fs.unlinkSync(file.path); } catch (e) { }
+        }
       });
       throw err;
     }
@@ -185,22 +162,18 @@ const uploadFolderWithFiles = async (req, res) => {
         console.log(`📁 [Upload Folder] Ensuring folder: ${folderPath}`);
 
         // Create folder in database
+        // Create folder in database
+        // Start S3 Refactor: We still need DB folders, but not physical ones.
+        // However, function ensures DB folder exists.
         const folderId = await ensureFolderStructure(
           folderParts,
           userId,
           parentFolderId
         );
 
-        // Create physical folder in filesystem
-        const localDir = path.join("uploads", ...folderParts);
-        if (!fs.existsSync(localDir)) {
-          fs.mkdirSync(localDir, { recursive: true });
-          console.log(
-            `✅ [Upload Folder] Created physical folder: ${localDir}`
-          );
-        } else {
-          console.log(`ℹ️ [Upload Folder] Folder already exists: ${localDir}`);
-        }
+        // Remove physical folder creation for S3
+        // Logical folder structure is sufficient.
+        console.log(`✅ [Upload Folder] Ensured DB folder: ${folderPath} (ID: ${folderId})`);
       }
     } else {
       console.log("ℹ️ [Upload Folder] No folder paths to create");
@@ -226,7 +199,7 @@ const uploadFolderWithFiles = async (req, res) => {
 
         let folderId = parentFolderId;
 
-        // Ensure folders exist and get the final folder ID (redundant but safe)
+        // Ensure folders exist and get the final folder ID
         if (folderParts.length > 0) {
           folderId = await ensureFolderStructure(
             folderParts,
@@ -268,28 +241,38 @@ const uploadFolderWithFiles = async (req, res) => {
         finalName = checkName;
         // --- DUPLICATE CHECK & RENAME END ---
 
-        // Build correct save path
-        const localDir = path.join("uploads", ...folderParts);
-        const finalPath = path.join(localDir, finalName);
+        // --- S3 UPLOAD START ---
+        // Construct S3 Key: UserUploads/{userId}/{relativePath}
+        // relativePath includes the full folder structure + filename.
+        // But we want to ensure we use the *renamed* filename if there was a duplicate.
+        // So we reconstruct the path using folderParts + finalName.
 
-        // Ensure directory exists (should already exist from step 1)
-        if (!fs.existsSync(localDir)) {
-          console.log(
-            `⚠️ [Upload Folder] Folder missing, creating: ${localDir}`
-          );
-          fs.mkdirSync(localDir, { recursive: true });
+        const keyParts = [...folderParts, finalName];
+        // If relativePath started with folders, they are in folderParts.
+        // If we want a specific root for user, e.g. "UserUploads/UserID/..."
+        const s3Key = `UserUploads/${userId}/${keyParts.join("/")}`;
+
+        console.log(`🚀 [Upload Folder] Uploading to S3: ${s3Key}`);
+
+        await uploadFileToS3(file.path, s3Key, file.mimetype);
+
+        // Remove temp file
+        if (fs.existsSync(file.path)) {
+          try {
+            fs.unlinkSync(file.path);
+          } catch (e) { console.warn("Failed to delete temp file", e); }
         }
+        // --- S3 UPLOAD END ---
 
-        // Move file from temp to final location
-        fs.renameSync(file.path, finalPath);
+        const fileUrl = `/api/files/${encodeURIComponent(finalName)}/download`;
 
         // Save file metadata to DB and get the inserted file
         const [insertedFile] = await knex("files")
           .insert({
             name: finalName,
             folder_id: folderId,
-            file_path: finalPath,
-            file_url: `/uploads/${path.join(...folderParts, finalName)}`,
+            file_path: s3Key, // Store S3 Key
+            file_url: fileUrl, // API download URL
             created_by: userId,
             created_at: new Date(),
             updated_at: new Date(),
@@ -302,7 +285,7 @@ const uploadFolderWithFiles = async (req, res) => {
           .returning("*");
 
         uploadedFiles.push(insertedFile);
-        console.log(`✅ [Upload Folder] Saved file: ${finalPath}`);
+        console.log(`✅ [Upload Folder] Saved file info: ${finalName}`);
       }
     } else {
       console.log(
@@ -398,65 +381,88 @@ const downloadFile = async (req, res, next) => {
       return res.status(404).json({ error: "File path not found" });
     }
 
+    // Determine if it's an S3 file or Local file
     const path = require("path");
     const fs = require("fs");
 
-    // Robust path resolution strategy (Standardized)
-    let filePath = null;
-    const candidates = [];
+    // Heuristic: If it has "uploads\" or is absolute path, it is likely local (Legacy)
+    // New S3 keys are "UserUploads/..."
+    const isLocalFile = file.file_path && (path.isAbsolute(file.file_path) || file.file_path.includes("uploads\\") || file.file_path.includes("uploads/"));
 
-    if (file.file_path) {
-      // 1. Try exact path stored in DB
-      candidates.push(file.file_path);
+    if (!isLocalFile) {
+      // --- S3 DOWNLOAD ---
+      console.log(`📥 [downloadFile] Streaming from S3: ${file.file_path}`);
+      try {
+        const s3Stream = await getFileStreamFromS3(file.file_path);
 
-      // 2. Try resolving relative to CWD
-      candidates.push(path.resolve(process.cwd(), file.file_path));
+        // Set appropriate headers for download
+        res.setHeader("Content-Type", file.mime_type || "application/octet-stream");
+        res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
-      // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
-      const normalized = file.file_path.replace(/\\/g, '/');
-      const uploadIndex = normalized.indexOf('uploads/');
-
-      if (uploadIndex !== -1) {
-        const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
-        candidates.push(path.join(process.cwd(), suffix));
-        candidates.push(path.join(__dirname, '..', suffix));
-      } else {
-        // If path doesn't contain 'uploads', try prepending it (legacy data)
-        candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
+        s3Stream.pipe(res);
+      } catch (s3Error) {
+        console.error(`❌ [downloadFile] S3 Download Error:`, s3Error);
+        return res.status(404).json({ error: "File not found in cloud storage" });
       }
-    }
+    } else {
+      // --- LOCAL DOWNLOAD (LEGACY) ---
+      // Robust path resolution strategy (Standardized)
+      let filePath = null;
+      const candidates = [];
 
-    // Check all candidates
-    for (const p of candidates) {
-      if (fs.existsSync(p)) {
-        filePath = p;
-        break;
+      if (file.file_path) {
+        // 1. Try exact path stored in DB
+        candidates.push(file.file_path);
+
+        // 2. Try resolving relative to CWD
+        candidates.push(path.resolve(process.cwd(), file.file_path));
+
+        // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
+        const normalized = file.file_path.replace(/\\/g, '/');
+        const uploadIndex = normalized.indexOf('uploads/');
+
+        if (uploadIndex !== -1) {
+          const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
+          candidates.push(path.join(process.cwd(), suffix));
+          candidates.push(path.join(__dirname, '..', suffix));
+        } else {
+          // If path doesn't contain 'uploads', try prepending it (legacy data)
+          candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
+        }
       }
-    }
 
-    if (!filePath) {
-      console.error(`❌ [downloadFile] File not found. Checked candidates:`, candidates);
-      return res.status(404).json({ error: "File not found on server" });
-    }
+      // Check all candidates
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          filePath = p;
+          break;
+        }
+      }
 
-    if (!fs.existsSync(filePath)) {
+      if (!filePath) {
+        console.error(`❌ [downloadFile] File not found. Checked candidates:`, candidates);
+        return res.status(404).json({ error: "File not found on server" });
+      }
+
+      if (!fs.existsSync(filePath)) {
+        console.log(
+          `❌ [downloadFile] File does not exist on server - Path: ${file.file_path} (Resolved: ${filePath})`
+        );
+        return res.status(404).json({ error: "File not found on server" });
+      }
+
       console.log(
-        `❌ [downloadFile] File does not exist on server - Path: ${file.file_path} (Resolved: ${filePath})`
+        `✅ [downloadFile] File found, streaming - Path: ${filePath}`
       );
-      return res.status(404).json({ error: "File not found on server" });
+
+      // Set appropriate headers for download
+      res.setHeader("Content-Type", file.mime_type || "application/octet-stream");
+      res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
+
+      // Stream the file
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
     }
-
-    console.log(
-      `✅ [downloadFile] File found, streaming - Path: ${filePath}`
-    );
-
-    // Set appropriate headers for download
-    res.setHeader("Content-Type", file.mime_type || "application/octet-stream");
-    res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
-
-    // Stream the file
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
   } catch (err) {
     console.error("❌ [downloadFile] Error:", err);
     next(err);

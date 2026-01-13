@@ -24,15 +24,15 @@ const path = require("path"); // Add this if missing
 const fs = require("fs"); // Add this if missing
 const router = express.Router();
 const db = require("../config/db");
-const uploadDir = path.join(__dirname, "../uploads");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+const tempUploadDir = path.join(__dirname, "../temp_uploads");
+if (!fs.existsSync(tempUploadDir)) {
+  fs.mkdirSync(tempUploadDir, { recursive: true });
 }
 // Configure Multer for file uploads
 // Use Disk Storage - More reliable than memory storage
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, uploadDir);
+    cb(null, tempUploadDir);
   },
   filename: function (req, file, cb) {
     // Keep original filename but add unique suffix to avoid conflicts

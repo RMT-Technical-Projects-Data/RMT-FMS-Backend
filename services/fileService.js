@@ -2,6 +2,7 @@
 const knex = require("../config/db");
 const path = require("path");
 const fs = require("fs");
+const { uploadFileToS3, deleteFileFromS3 } = require("./s3Service");
 
 const uploadFile = async (file, folderId, userId, customName = null) => {
   console.log("=== UPLOAD FILE SERVICE START ===");
@@ -50,19 +51,38 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
 
     fileName = checkName;
 
-    // Use the path where multer saved the file
-    const filePath = file.path;
-    const fileUrl = `/api/files/${file.filename}/download`;
+    // --- S3 UPLOAD START ---
+    // Generate S3 Key: UserUploads/UserId/[FolderStructure]/FileName
+    // For simplicity: UserUploads/{userId}/{folderId or root}/{fileName}
+    let folderPath = "";
+    if (folderId) {
+      folderPath = `${folderId}/`;
+    } else {
+      folderPath = "root/";
+    }
+    const s3Key = `UserUploads/${userId}/${folderPath}${fileName}`;
 
-    console.log("File will be stored at:", filePath);
-    console.log("File URL will be:", fileUrl);
+    console.log(`🚀 Uploading to S3 Key: ${s3Key}`);
+    await uploadFileToS3(file.path, s3Key, file.mimetype);
+    console.log(`✅ Uploaded to S3`);
+
+    // Remove temp file
+    if (fs.existsSync(file.path)) {
+      try {
+        fs.unlinkSync(file.path);
+        console.log("Deleted local temp file");
+      } catch (e) { console.warn("Failed to delete temp file", e); }
+    }
+    // --- S3 UPLOAD END ---
+
+    const fileUrl = `/api/files/${file.filename}/download`; // Values URL stays same for proxying
 
     // Insert into DB
     const [fileId] = await trx("files").insert({
       name: fileName, // Use the (potentially renamed) filename
       original_name: file.originalname,
       folder_id: folderId || null,
-      file_path: filePath,
+      file_path: s3Key, // Store S3 Key
       file_url: fileUrl,
       mime_type: file.mimetype,
       size: file.size,
@@ -81,7 +101,7 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
       url: `/api/files/${fileId}/download`,
       size: file.size,
       mime_type: file.mimetype,
-      file_path: filePath,
+      file_path: s3Key,
     };
   } catch (error) {
     console.error("Error in uploadFile service:", error);
@@ -230,7 +250,26 @@ const uploadFolder = async (files, parentId, userId, paths = []) => {
         continue; // Skip upload for this file
       }
 
-      // Upload the file to the correct folder
+      // --- S3 UPLOAD START ---
+      let folderPath = "";
+      if (currentParentId) {
+        folderPath = `${currentParentId}/`;
+      } else {
+        folderPath = "root/";
+      }
+      const s3Key = `UserUploads/${userId}/${folderPath}${fileName}`;
+
+      console.log(`🚀 [FolderUpload] Uploading ${fileName} to S3 Key: ${s3Key}`);
+      await uploadFileToS3(file.path, s3Key, file.mimetype);
+
+      // Remove temp file
+      if (fs.existsSync(file.path)) {
+        try {
+          fs.unlinkSync(file.path);
+        } catch (e) { console.warn("Failed to delete temp file", e); }
+      }
+      // --- S3 UPLOAD END ---
+
       const fileUrl = `/api/files/${file.filename}/download`;
 
       try {
@@ -238,7 +277,7 @@ const uploadFolder = async (files, parentId, userId, paths = []) => {
           name: fileName,
           original_name: file.originalname || file.name,
           folder_id: currentParentId,
-          file_path: file.path,
+          file_path: s3Key, // Store S3 Key
           file_url: fileUrl,
           mime_type: file.mimetype,
           size: file.size,
@@ -556,20 +595,36 @@ const permanentDeleteFile = async (fileId) => {
     throw new Error("File not found");
   }
 
-  // Check if any other file uses the same path
+  // Check if any other file uses the same path (deduplication check)
   const otherFiles = await knex("files")
     .where({ file_path: file.file_path })
     .whereNot({ id: fileId })
     .first();
 
-  // Delete physical file ONLY if no other references exist
   if (!otherFiles) {
-    const fs = require("fs");
-    if (file.file_path && fs.existsSync(file.file_path)) {
-      try {
-        fs.unlinkSync(file.file_path);
-      } catch (err) {
-        console.error("Error deleting physical file:", err);
+    // Determine if it's an S3 file or Local file
+    const path = require("path");
+    const isLocalFile = file.file_path && (path.isAbsolute(file.file_path) || file.file_path.includes("uploads\\") || file.file_path.includes("uploads/"));
+
+    if (isLocalFile) {
+      // --- LOCAL DELETE ---
+      if (file.file_path && fs.existsSync(file.file_path)) {
+        try {
+          fs.unlinkSync(file.file_path);
+          console.log(`🗑️ [permanentDeleteFile] Deleted physical file: ${file.file_path}`);
+        } catch (err) {
+          console.error("Error deleting physical file:", err);
+        }
+      }
+    } else {
+      // --- S3 DELETE ---
+      if (file.file_path) {
+        try {
+          console.log(`🗑️ [permanentDeleteFile] Deleting S3 Object: ${file.file_path}`);
+          await deleteFileFromS3(file.file_path);
+        } catch (err) {
+          console.error(`❌ [permanentDeleteFile] Error deleting S3 object:`, err);
+        }
       }
     }
   } else {

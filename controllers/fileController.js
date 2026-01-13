@@ -507,60 +507,96 @@ const openFile = async (req, res, next) => {
       return res.status(404).json({ error: "File not found" });
     }
 
-    // Robust path resolution strategy (Standardized)
-    let filePath = null;
-    const candidates = [];
+    // Determine if it's an S3 file or Local file
+    // Heuristic: If it has "uploads\" or is absolute path, it is likely local (Legacy)
+    // New S3 keys are "UserUploads/..."
+    const isLocalFile =
+      file.file_path &&
+      (path.isAbsolute(file.file_path) ||
+        file.file_path.includes("uploads\\") ||
+        file.file_path.includes("uploads/"));
 
-    if (file.file_path) {
-      candidates.push(file.file_path);
-      candidates.push(path.resolve(process.cwd(), file.file_path));
+    if (!isLocalFile) {
+      // --- S3 OPEN (STREAMING) ---
+      console.log(`🟢 [openFile] Streaming from S3: ${file.file_path}`);
+      try {
+        const s3Stream = await getFileStreamFromS3(file.file_path);
 
-      const normalized = file.file_path.replace(/\\/g, '/');
-      const uploadIndex = normalized.indexOf('uploads/');
+        const mimeType = file.mime_type || "application/octet-stream";
 
-      if (uploadIndex !== -1) {
-        const suffix = normalized.substring(uploadIndex);
-        candidates.push(path.join(process.cwd(), suffix));
-        candidates.push(path.join(__dirname, '..', suffix));
-      } else {
-        candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
+        // ✅ Set headers for viewing inline
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+
+        s3Stream.pipe(res);
+      } catch (s3Error) {
+        console.error(`❌ [openFile] S3 Stream Error:`, s3Error);
+        return res
+          .status(404)
+          .json({ error: "File not found in cloud storage" });
       }
-    }
+    } else {
+      // --- LOCAL OPEN (LEGACY) ---
+      // Robust path resolution strategy (Standardized)
+      let filePath = null;
+      const candidates = [];
 
-    for (const p of candidates) {
-      if (fs.existsSync(p)) {
-        filePath = p;
-        break;
+      if (file.file_path) {
+        candidates.push(file.file_path);
+        candidates.push(path.resolve(process.cwd(), file.file_path));
+
+        const normalized = file.file_path.replace(/\\/g, "/");
+        const uploadIndex = normalized.indexOf("uploads/");
+
+        if (uploadIndex !== -1) {
+          const suffix = normalized.substring(uploadIndex);
+          candidates.push(path.join(process.cwd(), suffix));
+          candidates.push(path.join(__dirname, "..", suffix));
+        } else {
+          candidates.push(path.join(process.cwd(), "uploads", file.file_path));
+        }
       }
+
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          filePath = p;
+          break;
+        }
+      }
+
+      if (!filePath) {
+        console.error(
+          `❌ [openFile] File not found. Checked candidates:`,
+          candidates
+        );
+        return res.status(404).json({ error: "File not found on server" });
+      }
+
+      if (!filePath || !fs.existsSync(filePath)) {
+        console.log(
+          `❌ [openFile] File missing on server - Path: ${file.file_path}`
+        );
+        return res.status(404).json({ error: "File not found on server" });
+      }
+
+      const mimeType =
+        file.mime_type ||
+        mime.lookup(filePath) ||
+        "application/octet-stream";
+
+      console.log(`✅ [openFile] Streaming file inline - MIME: ${mimeType}`);
+
+      // ✅ Set headers for viewing inline (not download)
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+      res.setHeader("Content-Type", mimeType);
+      res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
     }
-
-    if (!filePath) {
-      console.error(`❌ [openFile] File not found. Checked candidates:`, candidates);
-      return res.status(404).json({ error: "File not found on server" });
-    }
-
-    if (!filePath || !fs.existsSync(filePath)) {
-      console.log(
-        `❌ [openFile] File missing on server - Path: ${file.file_path}`
-      );
-      return res.status(404).json({ error: "File not found on server" });
-    }
-
-    const mimeType =
-      file.mime_type ||
-      mime.lookup(filePath) ||
-      "application/octet-stream";
-
-    console.log(`✅ [openFile] Streaming file inline - MIME: ${mimeType}`);
-
-    // ✅ Set headers for viewing inline (not download)
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
-    res.setHeader("Content-Type", mimeType);
-    res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
-
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
   } catch (err) {
     console.error("❌ [openFile] Error:", err);
     next(err);

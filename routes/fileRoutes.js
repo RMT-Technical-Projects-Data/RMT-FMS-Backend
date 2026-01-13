@@ -20,6 +20,7 @@ const {
 } = require("../controllers/fileController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
+const { getFileStreamFromS3 } = require("../services/s3Service");
 const path = require("path"); // Add this if missing
 const fs = require("fs"); // Add this if missing
 const router = express.Router();
@@ -185,58 +186,83 @@ router.get("/open/direct/:id", async (req, res) => {
 
     if (!file) return res.status(404).json({ error: "File not found" });
 
-    // Robust path resolution (copied from fileController)
-    // Robust path resolution strategy
-    let filePath = null;
-    const candidates = [];
+    // Determine if it's an S3 file or Local file
+    const isLocalFile =
+      file.file_path &&
+      (path.isAbsolute(file.file_path) ||
+        file.file_path.includes("uploads\\") ||
+        file.file_path.includes("uploads/"));
 
-    if (file.file_path) {
-      // 1. Try exact path stored in DB
-      candidates.push(file.file_path);
+    if (!isLocalFile) {
+      // --- S3 OPEN (STREAMING) ---
+      try {
+        const s3Stream = await getFileStreamFromS3(file.file_path);
 
-      // 2. Try resolving relative to CWD
-      candidates.push(path.resolve(process.cwd(), file.file_path));
+        const mime = require("mime-types");
+        const mimeType =
+          file.mime_type ||
+          (file.file_path.endsWith(".pdf") ? "application/pdf" : mime.lookup(file.name)) ||
+          "application/octet-stream";
 
-      // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
-      const normalized = file.file_path.replace(/\\/g, '/');
-      const uploadIndex = normalized.indexOf('uploads/');
+        res.setHeader("Content-Type", mimeType);
+        res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
 
-      if (uploadIndex !== -1) {
-        const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
-        candidates.push(path.join(process.cwd(), suffix));
-        candidates.push(path.join(__dirname, '..', suffix));
-      } else {
-        // If path doesn't contain 'uploads', try prepending it (legacy data)
-        candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
+        s3Stream.pipe(res);
+      } catch (s3Error) {
+        console.error(`❌ [open/direct] S3 Stream Error:`, s3Error);
+        return res.status(404).json({ error: "File not found in cloud storage" });
       }
-    }
+    } else {
+      // --- LOCAL OPEN (LEGACY) ---
+      // Robust path resolution strategy
+      let filePath = null;
+      const candidates = [];
 
-    // Check all candidates
-    for (const p of candidates) {
-      if (fs.existsSync(p)) {
-        filePath = p;
-        break;
+      if (file.file_path) {
+        // 1. Try exact path stored in DB
+        candidates.push(file.file_path);
+
+        // 2. Try resolving relative to CWD
+        candidates.push(path.resolve(process.cwd(), file.file_path));
+
+        // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
+        const normalized = file.file_path.replace(/\\/g, '/');
+        const uploadIndex = normalized.indexOf('uploads/');
+
+        if (uploadIndex !== -1) {
+          const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
+          candidates.push(path.join(process.cwd(), suffix));
+          candidates.push(path.join(__dirname, '..', suffix));
+        } else {
+          // If path doesn't contain 'uploads', try prepending it (legacy data)
+          candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
+        }
       }
+
+      // Check all candidates
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          filePath = p;
+          break;
+        }
+      }
+
+      if (!filePath) {
+        console.error(`❌ [open/direct] File not found. Checked candidates:`, candidates);
+        return res.status(404).json({ error: "File not found on server" });
+      }
+
+      const mime = require("mime-types");
+      const mimeType =
+        file.mime_type ||
+        mime.lookup(filePath) ||
+        "application/octet-stream";
+
+      res.setHeader("Content-Type", mimeType);
+      res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+
+      fs.createReadStream(filePath).pipe(res);
     }
-
-    if (!filePath) {
-      console.error(`❌ [open/direct] File not found. Checked candidates:`, candidates);
-      return res.status(404).json({ error: "File not found on server" });
-    }
-
-    if (!filePath || !fs.existsSync(filePath))
-      return res.status(404).json({ error: "File not found" });
-
-    const mime = require("mime-types");
-    const mimeType =
-      file.mime_type ||
-      mime.lookup(filePath) ||
-      "application/octet-stream";
-
-    res.setHeader("Content-Type", mimeType);
-    res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
-
-    fs.createReadStream(filePath).pipe(res);
   } catch (err) {
     console.error("❌ [open/direct] Error:", err);
     return res.status(401).json({ error: "Invalid or expired link" });

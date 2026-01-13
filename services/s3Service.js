@@ -1,5 +1,5 @@
 const { Upload } = require("@aws-sdk/lib-storage");
-const { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
+const { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, CopyObjectCommand } = require("@aws-sdk/client-s3");
 const fs = require("fs");
 const { s3Client, BUCKET_NAME } = require("../config/s3Config");
 
@@ -90,9 +90,31 @@ const checkFileExistsInS3 = async (key) => {
     }
 }
 
+/**
+ * Copy a file in S3
+ * @param {string} sourceKey - Source S3 object key
+ * @param {string} destinationKey - Destination S3 object key
+ * @returns {Promise<void>}
+ */
+const copyFileInS3 = async (sourceKey, destinationKey) => {
+    try {
+        const command = new CopyObjectCommand({
+            Bucket: BUCKET_NAME,
+            CopySource: `${BUCKET_NAME}/${sourceKey}`, // Format: Bucket/Key
+            Key: destinationKey,
+        });
+        await s3Client.send(command);
+        console.log(`©️ [S3] Copied object from ${sourceKey} to ${destinationKey}`);
+    } catch (err) {
+        console.error(`❌ [S3] Copy error:`, err);
+        throw err;
+    }
+};
+
 module.exports = {
     uploadFileToS3,
     deleteFileFromS3,
     getFileStreamFromS3,
-    checkFileExistsInS3
+    checkFileExistsInS3,
+    copyFileInS3
 };

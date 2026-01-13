@@ -2,7 +2,7 @@
 const knex = require("../config/db");
 const path = require("path");
 const fs = require("fs");
-const { uploadFileToS3, deleteFileFromS3 } = require("./s3Service");
+const { uploadFileToS3, deleteFileFromS3, copyFileInS3 } = require("./s3Service");
 
 const uploadFile = async (file, folderId, userId, customName = null) => {
   console.log("=== UPLOAD FILE SERVICE START ===");
@@ -360,12 +360,58 @@ const updateFile = async (fileId, updates) => {
 };
 
 const deleteFile = async (fileId) => {
-  // Soft delete: mark as deleted, do not remove physical file immediately
+  // Get file info
+  const file = await knex("files").where({ id: fileId }).first();
+  if (!file) throw new Error("File not found");
+
+  const userId = file.created_by;
+
+  // S3 Move-to-Trash Logic
+  // Determine if it's an S3 file
+  const path = require("path");
+  const isLocalFile = file.file_path && (path.isAbsolute(file.file_path) || file.file_path.includes("uploads\\") || file.file_path.includes("uploads/"));
+
+  if (!isLocalFile && file.file_path && !file.is_deleted) {
+    try {
+      const timestamp = Date.now();
+      const originalName = file.name;
+      const trashKey = `Trash/${userId}/${timestamp}/${originalName}`;
+
+      console.log(`🗑️ [deleteFile] Moving S3 file to Trash: ${trashKey}`);
+
+      // 1. Copy to Trash
+      await copyFileInS3(file.file_path, trashKey);
+
+      // 2. Delete original
+      await deleteFileFromS3(file.file_path);
+
+      // 3. Update DB with new path
+      await knex("files")
+        .where({ id: fileId })
+        .update({
+          file_path: trashKey,
+          is_deleted: true,
+          deleted_at: new Date(),
+          updated_at: new Date()
+        });
+
+      return; // Exit as we handled the update
+    } catch (err) {
+      console.error(`❌ [deleteFile] Error moving to S3 Trash:`, err);
+      // Fallback to simple soft delete if S3 ops fail (or re-throw if critical)
+      throw err;
+    }
+  }
+
+  // Legacy/Local Soft Delete (Just DB Flag)
   await knex("files")
     .where({ id: fileId })
     .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
 };
+
+// ... existing toggleFileFavourite ...
 const toggleFileFavourite = async (fileId, userId) => {
+  // ... keep existing implementation ...
   // Check if file exists
   const file = await knex("files").where({ id: fileId }).first();
   if (!file) throw new Error("File not found");
@@ -391,7 +437,6 @@ const toggleFileFavourite = async (fileId, userId) => {
     return { id: fileId, is_favourited: true };
   }
 };
-
 const getFavouriteFiles = async (userId) => {
   const favouriteFiles = await knex("user_favourite_files as uf")
     .join("files as f", "uf.file_id", "f.id")
@@ -493,13 +538,16 @@ const getTrashFiles = async (userId, folderId = null) => {
   }
 };
 
+// ... restoreFile ...
 const restoreFile = async (fileId) => {
   const trx = await knex.transaction();
   try {
     const file = await trx("files").where({ id: fileId }).first();
     if (!file) throw new Error("File not found");
 
-    // Check if a file with the same name already exists in the same directory (active files only)
+    const userId = file.created_by;
+
+    // Check collision
     const existingFile = await trx("files")
       .where({
         name: file.name,
@@ -513,6 +561,50 @@ const restoreFile = async (fileId) => {
       throw new Error("File already exists");
     }
 
+    // S3 Restore Logic
+    const isS3Trash = file.file_path && file.file_path.startsWith("Trash/");
+
+    if (isS3Trash) {
+      try {
+        const folderId = file.folder_id;
+        let folderPath = "";
+        if (folderId) {
+          folderPath = `${folderId}/`;
+        } else {
+          folderPath = "root/";
+        }
+        // Reconstruct original key: UserUploads/{userId}/{folderPath}/{fileName}
+        const originalKey = `UserUploads/${userId}/${folderPath}${file.name}`;
+
+        console.log(`♻️ [restoreFile] Restoring from Trash to: ${originalKey}`);
+
+        // 1. Copy back to original location
+        await copyFileInS3(file.file_path, originalKey);
+
+        // 2. Delete from Trash
+        await deleteFileFromS3(file.file_path);
+
+        // 3. Update DB
+        await trx("files")
+          .where({ id: fileId })
+          .update({
+            file_path: originalKey,
+            is_deleted: false,
+            deleted_at: null,
+            updated_at: new Date()
+          });
+
+        await trx.commit();
+        return { id: fileId, restored: true };
+
+      } catch (err) {
+        console.error(`❌ [restoreFile] Error restoring from S3 Trash:`, err);
+        // If S3 fails, we probably shouldn't un-flag it in DB
+        throw err;
+      }
+    }
+
+    // Local/Legacy Restore
     await trx("files")
       .where({ id: fileId })
       .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });

@@ -19,6 +19,8 @@ const {
   permanentDeleteFolder,
   getArchivedFoldersByParent,
 } = require("../services/folderService");
+const { getFileBuffer } = require("../utils/fileContentHelper");
+const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
 
 const createfolder = async (req, res, next) => {
   try {
@@ -333,78 +335,62 @@ const downloadFolder = async (req, res, next) => {
       `📁 Download folder function called for ID: ${folderId}, User: ${req.user.id}, Role: ${req.user.role}`
     );
 
-    // First check if folder exists in database
     const folder = await knex("folders").where({ id: folderId }).first();
-    console.log(
-      `🔍 Database check for folder ${folderId}:`,
-      folder ? `Found: ${folder.name}` : "NOT FOUND"
-    );
-
-    if (!folder) {
-      console.log(`❌ Folder ${folderId} not found in database`);
+    if (!folder || folder.is_deleted) {
       return res.status(404).json({ error: "Folder not found" });
     }
 
     console.log(`✅ Folder found: ${folder.name} (ID: ${folder.id})`);
 
-    // Get all files in this folder and subfolders recursively with folder structure
-    const getAllFilesInFolder = async (folderId, parentPath = "") => {
-      const files = await knex("files").where("folder_id", folderId);
-      const subfolders = await knex("folders").where("parent_id", folderId);
+    // Collect active files + empty folder paths recursively (S3 + local)
+    const collectTree = async (currentFolderId, parentPath = "") => {
+      const files = await knex("files")
+        .where("folder_id", currentFolderId)
+        .andWhere("is_deleted", false)
+        .andWhere("is_archived", false);
 
-      // Add current folder's files with proper path
+      const subfolders = await knex("folders")
+        .where("parent_id", currentFolderId)
+        .andWhere("is_deleted", false);
+
       const filesWithPath = files.map((file) => ({
         ...file,
         relativePath: parentPath ? `${parentPath}/${file.name}` : file.name,
       }));
 
-      // Process subfolders recursively
+      const folderPaths = [];
+      if (parentPath) {
+        folderPaths.push(parentPath.endsWith("/") ? parentPath : `${parentPath}/`);
+      }
+
       for (const subfolder of subfolders) {
         const subfolderPath = parentPath
           ? `${parentPath}/${subfolder.name}`
           : subfolder.name;
-        const subfolderFiles = await getAllFilesInFolder(
-          subfolder.id,
-          subfolderPath
-        );
-        filesWithPath.push(...subfolderFiles);
+        const nested = await collectTree(subfolder.id, subfolderPath);
+        filesWithPath.push(...nested.files);
+        folderPaths.push(...nested.folderPaths);
+        // Ensure empty subfolders are still represented
+        if (nested.files.length === 0) {
+          folderPaths.push(`${subfolderPath}/`);
+        }
       }
 
-      return filesWithPath;
+      return { files: filesWithPath, folderPaths };
     };
 
-    const allFiles = await getAllFilesInFolder(folderId);
+    const rootPrefix = folder.name;
+    const { files: allFiles, folderPaths } = await collectTree(
+      folderId,
+      rootPrefix
+    );
 
-    if (allFiles.length === 0) {
-      console.log(`⚠️ Folder ${folderId} is empty, creating empty zip`);
-      // Create an empty zip file instead of returning 404
-      const archive = archiver("zip", { zlib: { level: 9 } });
-
-      // Handle archive errors
-      archive.on("error", (err) => {
-        console.error("Archive error:", err);
-        res.status(500).json({ error: "Failed to create archive" });
-      });
-
-      res.setHeader("Content-Type", "application/zip");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${folder.name}.zip"`
-      );
-      console.log("lets check folder name here", folder.name);
-
-      archive.pipe(res);
-      archive.finalize();
-      return;
-    }
-
-    // Create zip archive
     const archive = archiver("zip", { zlib: { level: 9 } });
-
-    // Handle archive errors
     archive.on("error", (err) => {
       console.error("Archive error:", err);
-      res.status(500).json({ error: "Failed to create archive" });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to create archive" });
+      }
     });
 
     res.setHeader("Content-Type", "application/zip");
@@ -412,27 +398,56 @@ const downloadFolder = async (req, res, next) => {
       "Content-Disposition",
       `attachment; filename="${folder.name}.zip"`
     );
-
     archive.pipe(res);
 
-    // Add files to archive with proper folder structure
+    // Always include root folder entry
+    archive.append("", { name: `${rootPrefix}/` });
+
+    // Include nested folder entries (including empty ones)
+    const uniqueFolders = [...new Set(folderPaths)];
+    for (const folderPath of uniqueFolders) {
+      if (folderPath && folderPath !== `${rootPrefix}/`) {
+        archive.append("", { name: folderPath.endsWith("/") ? folderPath : `${folderPath}/` });
+      }
+    }
+
+    let added = 0;
     for (const file of allFiles) {
-      const filePath = file.file_path || file.path;
-      if (filePath && fs.existsSync(filePath)) {
+      try {
+        let buffer = await getFileBuffer(file);
+
+        // Apply download stamps for PDFs inside the zip
+        if (isPdfFile(file)) {
+          try {
+            buffer = await applyPdfStamps(buffer, {
+              master: true,
+              controlled: true,
+            });
+          } catch (stampErr) {
+            console.warn(
+              `⚠️ Stamp skipped for ${file.name}:`,
+              stampErr.message
+            );
+          }
+        }
+
         const relativePath =
           file.relativePath || file.original_name || file.name;
-        console.log(
-          `📄 Adding file to archive: ${filePath} as ${relativePath}`
-        );
-        archive.file(filePath, { name: relativePath });
-      } else {
-        console.log(
-          `⚠️ File not found or no path: ${file.name} (path: ${filePath})`
+        archive.append(buffer, { name: relativePath });
+        added += 1;
+        console.log(`📄 Added to zip: ${relativePath}`);
+      } catch (fileErr) {
+        console.error(
+          `⚠️ Skipping file ${file.name} (${file.file_path}):`,
+          fileErr.message
         );
       }
     }
 
-    archive.finalize();
+    console.log(
+      `✅ Folder zip ready: ${added}/${allFiles.length} files, ${uniqueFolders.length} folder paths`
+    );
+    await archive.finalize();
   } catch (err) {
     console.error("Error in downloadFolder:", err);
     next(err);

@@ -12,6 +12,7 @@ const {
   getTrashFoldersController,
   restoreFolderController,
   permanentDeleteFolderController,
+  getArchivedFoldersController,
 } = require("../controllers/folderController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
@@ -150,6 +151,7 @@ router.get("/tree/structure", authMiddleware, getFolderTreeStructure);
 router.post("/:id/favourite/toggle", authMiddleware, setResourceInfo, checkPermission, toggleFolderFavouriteController);
 router.get("/favourites", authMiddleware, getFavouriteFoldersController);
 router.get("/trash", authMiddleware, getTrashFoldersController);
+router.get("/archived", authMiddleware, getArchivedFoldersController);
 router.post("/:id/restore", authMiddleware, restoreFolderController);
 router.delete("/:id/permanent", authMiddleware, permanentDeleteFolderController);
 

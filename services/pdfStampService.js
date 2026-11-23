@@ -1,4 +1,4 @@
-const { PDFDocument, rgb, degrees, StandardFonts } = require("pdf-lib");
+const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 
 const isPdfFile = (file) => {
   if (!file) return false;
@@ -7,79 +7,116 @@ const isPdfFile = (file) => {
   return mime.includes("pdf") || name.endsWith(".pdf");
 };
 
-/**
- * Origin point so rotated text is visually centered on the page.
- * pdf-lib rotates around the draw origin (bottom-left of the text).
- */
-const centeredRotatedOrigin = (pageWidth, pageHeight, textWidth, textHeight, angleDeg) => {
-  const rad = (angleDeg * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  const cx = pageWidth / 2;
-  const cy = pageHeight / 2;
+const drawTagBox = (page, font, { text, x, y, bg, fg }) => {
+  const fontSize = 11;
+  const padX = 10;
+  const padY = 7;
+  const textWidth = font.widthOfTextAtSize(text, fontSize);
+  const boxW = textWidth + padX * 2;
+  const boxH = fontSize + padY * 2;
 
-  return {
-    x: cx - (textWidth / 2) * cos + (textHeight / 2) * sin,
-    y: cy - (textWidth / 2) * sin - (textHeight / 2) * cos,
-  };
+  page.drawRectangle({
+    x,
+    y,
+    width: boxW,
+    height: boxH,
+    color: bg,
+    opacity: 0.95,
+  });
+
+  page.drawText(text, {
+    x: x + padX,
+    y: y + padY,
+    size: fontSize,
+    font,
+    color: fg,
+  });
+
+  return { boxW, boxH };
 };
 
 /**
- * Apply a stamp overlay to every page of a PDF.
- * - controlled: diagonal CONTROLLED watermark (page-centered, rotated)
- * - obsolete: diagonal OBSOLETE watermark (page-centered, rotated)
+ * Apply PDF document-control stamps.
+ * - master: green "Master Copy" — first page top-right
+ * - controlled: blue "Controlled Copy" — bottom-right
+ * - obsolete: red "OBSOLETE" — first page + last page end/right
  */
-const applyPdfStamp = async (pdfBuffer, stampType) => {
+const applyPdfStamps = async (pdfBuffer, options = {}) => {
+  const { master = false, controlled = false, obsolete = false } = options;
+  if (!master && !controlled && !obsolete) return pdfBuffer;
+
   const pdfDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
   const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const pages = pdfDoc.getPages();
+  if (pages.length === 0) return pdfBuffer;
 
-  for (const page of pages) {
-    const { width, height } = page.getSize();
+  const green = rgb(0.12, 0.55, 0.25);
+  const blue = rgb(0.08, 0.28, 0.65);
+  const red = rgb(0.75, 0.12, 0.12);
+  const white = rgb(1, 1, 1);
 
-    if (stampType === "obsolete") {
-      const fontSize = Math.min(width, height) * 0.12;
-      const text = "OBSOLETE";
-      const textWidth = font.widthOfTextAtSize(text, fontSize);
-      const angle = 45;
-      const { x, y } = centeredRotatedOrigin(
-        width,
-        height,
-        textWidth,
-        fontSize,
-        angle
-      );
+  const first = pages[0];
+  const last = pages[pages.length - 1];
 
-      page.drawText(text, {
-        x,
-        y,
-        size: fontSize,
-        font,
-        color: rgb(0.75, 0.1, 0.1),
-        opacity: 0.45,
-        rotate: degrees(angle),
+  if (master) {
+    const { width, height } = first.getSize();
+    const label = "Master Copy";
+    const textWidth = font.widthOfTextAtSize(label, 11);
+    const boxW = textWidth + 20;
+    drawTagBox(first, font, {
+      text: label,
+      x: width - boxW - 28,
+      y: height - 42,
+      bg: green,
+      fg: white,
+    });
+  }
+
+  if (controlled) {
+    // Bottom-right blue tag (download)
+    for (const page of pages) {
+      const { width } = page.getSize();
+      const label = "Controlled Copy";
+      const textWidth = font.widthOfTextAtSize(label, 11);
+      const boxW = textWidth + 20;
+      drawTagBox(page, font, {
+        text: label,
+        x: width - boxW - 28,
+        y: 24,
+        bg: blue,
+        fg: white,
       });
-    } else {
-      const fontSize = Math.min(width, height) * 0.1;
-      const text = "CONTROLLED";
-      const textWidth = font.widthOfTextAtSize(text, fontSize);
-      const angle = -35;
-      const { x, y } = centeredRotatedOrigin(
-        width,
-        height,
-        textWidth,
-        fontSize,
-        angle
-      );
+    }
+  }
 
-      page.drawText(text, {
-        x,
-        y,
-        size: fontSize,
-        font,
-        color: rgb(0.1, 0.25, 0.55),
-        opacity: 0.32,
-        rotate: degrees(angle),
+  if (obsolete) {
+    // First page OBSOLETE (top-right)
+    {
+      const { width, height } = first.getSize();
+      const label = "OBSOLETE";
+      const textWidth = font.widthOfTextAtSize(label, 11);
+      const boxW = textWidth + 20;
+      drawTagBox(first, font, {
+        text: label,
+        x: width - boxW - 28,
+        y: height - 42,
+        bg: red,
+        fg: white,
+      });
+    }
+
+    // Last page OBSOLETE at end / right side (bottom-right)
+    {
+      const { width } = last.getSize();
+      const label = "OBSOLETE";
+      const textWidth = font.widthOfTextAtSize(label, 11);
+      const boxW = textWidth + 20;
+      drawTagBox(last, font, {
+        text: label,
+        x: width - boxW - 28,
+        y: 24,
+        bg: red,
+        fg: white,
       });
     }
   }
@@ -88,7 +125,22 @@ const applyPdfStamp = async (pdfBuffer, stampType) => {
   return Buffer.from(stamped);
 };
 
+/** @deprecated compatibility wrapper */
+const applyPdfStamp = async (pdfBuffer, stampType) => {
+  if (stampType === "obsolete") {
+    return applyPdfStamps(pdfBuffer, { obsolete: true });
+  }
+  if (stampType === "controlled") {
+    return applyPdfStamps(pdfBuffer, { controlled: true, master: true });
+  }
+  if (stampType === "master") {
+    return applyPdfStamps(pdfBuffer, { master: true });
+  }
+  return pdfBuffer;
+};
+
 module.exports = {
   isPdfFile,
   applyPdfStamp,
+  applyPdfStamps,
 };

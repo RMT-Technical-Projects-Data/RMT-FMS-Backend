@@ -21,10 +21,11 @@ const {
   archiveFile,
   unarchiveFile,
   getArchivedFiles,
+  getArchivedFoldersByParent,
 } = require("../services/fileService");
 const { getFileStreamFromS3, uploadFileToS3 } = require("../services/s3Service");
 const { logDownloadActivity, getDownloadAuditLogs } = require("../services/auditService");
-const { isPdfFile, applyPdfStamp } = require("../services/pdfStampService");
+const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
 const { getFileBuffer, getFileReadable } = require("../utils/fileContentHelper");
 
 
@@ -382,15 +383,20 @@ const downloadFile = async (req, res, next) => {
     const contentType = file.mime_type || "application/octet-stream";
     res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
-    // Active PDFs → CONTROLLED only; archived PDFs → OBSOLETE only
+    // Download stamps:
+    // - archived → OBSOLETE (first + last page)
+    // - active → Master Copy (first page) + Controlled Copy (bottom-right)
     if (isPdfFile(file)) {
       try {
         let pdfBuffer = await getFileBuffer(file);
-        pdfBuffer = await applyPdfStamp(
-          pdfBuffer,
-          file.is_archived ? "obsolete" : "controlled",
-          { username, downloadedAt }
-        );
+        if (file.is_archived) {
+          pdfBuffer = await applyPdfStamps(pdfBuffer, { obsolete: true });
+        } else {
+          pdfBuffer = await applyPdfStamps(pdfBuffer, {
+            master: true,
+            controlled: true,
+          });
+        }
 
         res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Length", pdfBuffer.length);
@@ -657,7 +663,7 @@ const getFiles = async (req, res, next) => {
 const updateFileDetails = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
-    const { name, created_at } = req.body;
+    const { name, created_at, has_master_stamp } = req.body;
     const userRole = (req.user.role || "").toLowerCase().trim();
 
     req.resourceType = "file";
@@ -668,6 +674,10 @@ const updateFileDetails = async (req, res, next) => {
 
     if (typeof name === "string" && name.trim()) {
       updates.name = name.trim();
+    }
+
+    if (typeof has_master_stamp === "boolean") {
+      updates.has_master_stamp = has_master_stamp;
     }
 
     // Upload date editing is Super Admin only — never expose to regular users
@@ -693,6 +703,34 @@ const updateFileDetails = async (req, res, next) => {
     res.json(updatedFile);
   } catch (err) {
     console.error("Error in updateFileDetails:", err);
+    next(err);
+  }
+};
+
+const setMasterStampBatchController = async (req, res, next) => {
+  try {
+    const { fileIds, has_master_stamp } = req.body;
+    if (!Array.isArray(fileIds) || fileIds.length === 0) {
+      return res.status(400).json({ error: "fileIds required" });
+    }
+    if (typeof has_master_stamp !== "boolean") {
+      return res.status(400).json({ error: "has_master_stamp boolean required" });
+    }
+
+    await knex("files")
+      .whereIn(
+        "id",
+        fileIds.map((id) => parseInt(id, 10)).filter((n) => !Number.isNaN(n))
+      )
+      .update({
+        has_master_stamp,
+        updated_at: new Date(),
+      });
+
+    const files = await knex("files").whereIn("id", fileIds);
+    res.json({ message: "Stamp preference saved", files });
+  } catch (err) {
+    console.error("Error in setMasterStampBatchController:", err);
     next(err);
   }
 };
@@ -744,10 +782,38 @@ const unarchiveFileController = async (req, res, next) => {
 
 const getArchivedFilesController = async (req, res, next) => {
   try {
-    const files = await getArchivedFiles(req.user.id, req.user.role);
+    const folderId =
+      req.query.folder_id !== undefined &&
+      req.query.folder_id !== null &&
+      req.query.folder_id !== "" &&
+      req.query.folder_id !== "null"
+        ? parseInt(req.query.folder_id, 10)
+        : null;
+    const files = await getArchivedFiles(req.user.id, req.user.role, folderId);
     res.json({ files });
   } catch (err) {
     console.error("Error in getArchivedFilesController:", err);
+    next(err);
+  }
+};
+
+const getArchivedFoldersController = async (req, res, next) => {
+  try {
+    const parentId =
+      req.query.parent_id !== undefined &&
+      req.query.parent_id !== null &&
+      req.query.parent_id !== "" &&
+      req.query.parent_id !== "null"
+        ? parseInt(req.query.parent_id, 10)
+        : null;
+    const folders = await getArchivedFoldersByParent(
+      req.user.id,
+      req.user.role,
+      parentId
+    );
+    res.json({ folders });
+  } catch (err) {
+    console.error("Error in getArchivedFoldersController:", err);
     next(err);
   }
 };
@@ -869,9 +935,11 @@ module.exports = {
   restoreFileController,
   permanentDeleteFileController,
   getDownloadAuditLogsController,
+  setMasterStampBatchController,
   archiveFileController,
   unarchiveFileController,
   getArchivedFilesController,
+  getArchivedFoldersController,
   openFile,
   moveFileController,
 };

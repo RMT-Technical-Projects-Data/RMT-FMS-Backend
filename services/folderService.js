@@ -501,6 +501,65 @@ const restoreFolder = async (folderId) => {
   return { id: folderId, restored: true };
 };
 
+/**
+ * Archive navigation folders: ancestors of archived files only.
+ */
+const getArchivedFoldersByParent = async (userId, userRole, parentId = null) => {
+  const role = (userRole || "").toLowerCase().trim();
+
+  let archivedQuery = knex("files")
+    .where("is_archived", true)
+    .andWhere("is_deleted", false)
+    .whereNotNull("folder_id")
+    .select("folder_id");
+
+  if (role !== "super_admin") {
+    archivedQuery = archivedQuery.andWhere("created_by", userId);
+  }
+
+  const archivedRows = await archivedQuery;
+  const directFolderIds = [
+    ...new Set(archivedRows.map((r) => r.folder_id).filter(Boolean)),
+  ];
+
+  if (directFolderIds.length === 0) return [];
+
+  const allFolders = await knex("folders")
+    .where("is_deleted", false)
+    .select(
+      "id",
+      "name",
+      "parent_id",
+      "created_by",
+      "created_at",
+      "updated_at",
+      "is_deleted",
+      "deleted_at"
+    );
+
+  const byId = new Map(allFolders.map((f) => [f.id, f]));
+  const relevantIds = new Set();
+
+  for (const folderId of directFolderIds) {
+    let currentId = folderId;
+    while (currentId && byId.has(currentId)) {
+      relevantIds.add(currentId);
+      currentId = byId.get(currentId).parent_id;
+    }
+  }
+
+  const parentKey =
+    parentId === null || parentId === undefined || parentId === "null"
+      ? null
+      : parseInt(parentId, 10);
+
+  return allFolders.filter((folder) => {
+    if (!relevantIds.has(folder.id)) return false;
+    if (parentKey === null) return folder.parent_id == null;
+    return Number(folder.parent_id) === parentKey;
+  });
+};
+
 const permanentDeleteFolder = async (folderId) => {
   // Get folder info before deletion
   const folder = await knex("folders").where({ id: folderId }).first();
@@ -666,4 +725,5 @@ module.exports = {
   getNestedFiles,
   restoreFolder,
   permanentDeleteFolder,
+  getArchivedFoldersByParent,
 };

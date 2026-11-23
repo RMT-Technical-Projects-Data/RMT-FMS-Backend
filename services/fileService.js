@@ -770,9 +770,10 @@ const unarchiveFile = async (fileId) => {
 };
 
 /**
- * List archived (non-deleted) files. Super Admin sees all; users see own.
+ * List archived (non-deleted) files in a folder scope.
+ * Super Admin sees all; users see own. folder_id=null → root archived files only.
  */
-const getArchivedFiles = async (userId, userRole) => {
+const getArchivedFiles = async (userId, userRole, folderId = null) => {
   const query = knex("files")
     .leftJoin("folders", "files.folder_id", "folders.id")
     .select("files.*", "folders.name as folder_name")
@@ -785,7 +786,64 @@ const getArchivedFiles = async (userId, userRole) => {
     query.andWhere("files.created_by", userId);
   }
 
+  if (folderId === null || folderId === undefined || folderId === "null") {
+    query.whereNull("files.folder_id");
+  } else {
+    query.where("files.folder_id", parseInt(folderId, 10));
+  }
+
   return query;
+};
+
+/**
+ * Folders that appear in Archive for a parent:
+ * only ancestor folders of archived files (not every file in those folders).
+ */
+const getArchivedFoldersByParent = async (userId, userRole, parentId = null) => {
+  const role = (userRole || "").toLowerCase().trim();
+
+  let archivedQuery = knex("files")
+    .where("is_archived", true)
+    .andWhere("is_deleted", false)
+    .whereNotNull("folder_id")
+    .select("folder_id");
+
+  if (role !== "super_admin") {
+    archivedQuery = archivedQuery.andWhere("created_by", userId);
+  }
+
+  const archivedRows = await archivedQuery;
+  const directFolderIds = [
+    ...new Set(archivedRows.map((r) => r.folder_id).filter(Boolean)),
+  ];
+
+  if (directFolderIds.length === 0) return [];
+
+  const allFolders = await knex("folders")
+    .where("is_deleted", false)
+    .select("id", "name", "parent_id", "created_by", "created_at", "updated_at");
+
+  const byId = new Map(allFolders.map((f) => [f.id, f]));
+  const relevantIds = new Set();
+
+  for (const folderId of directFolderIds) {
+    let currentId = folderId;
+    while (currentId && byId.has(currentId)) {
+      relevantIds.add(currentId);
+      currentId = byId.get(currentId).parent_id;
+    }
+  }
+
+  const parentKey =
+    parentId === null || parentId === undefined || parentId === "null"
+      ? null
+      : parseInt(parentId, 10);
+
+  return allFolders.filter((folder) => {
+    if (!relevantIds.has(folder.id)) return false;
+    if (parentKey === null) return folder.parent_id == null;
+    return folder.parent_id === parentKey;
+  });
 };
 
 module.exports = {
@@ -806,4 +864,5 @@ module.exports = {
   archiveFile,
   unarchiveFile,
   getArchivedFiles,
+  getArchivedFoldersByParent,
 };

@@ -21,11 +21,13 @@ const {
   archiveFileController,
   unarchiveFileController,
   getArchivedFilesController,
+  getArchivedFoldersController,
+  setMasterStampBatchController,
 } = require("../controllers/fileController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
 const { getFileStreamFromS3 } = require("../services/s3Service");
-const { isPdfFile, applyPdfStamp } = require("../services/pdfStampService");
+const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
 const { getFileBuffer, getFileReadable } = require("../utils/fileContentHelper");
 const path = require("path"); // Add this if missing
 const fs = require("fs"); // Add this if missing
@@ -169,8 +171,16 @@ router.get("/download/:id", authMiddleware, setFileResourceInfo, downloadFile);
 // Super Admin — download activity audit log
 router.get("/audit/downloads", authMiddleware, getDownloadAuditLogsController);
 
+// After upload: apply / clear Master Copy stamp preference
+router.post(
+  "/stamp-preference",
+  authMiddleware,
+  setMasterStampBatchController
+);
+
 // Archive lifecycle (distinct from trash)
 router.get("/archived", authMiddleware, getArchivedFilesController);
+router.get("/archived/folders", authMiddleware, getArchivedFoldersController);
 router.post(
   "/:id/archive",
   authMiddleware,
@@ -235,20 +245,28 @@ router.get("/open/direct/:id", async (req, res) => {
         : mime.lookup(file.name)) ||
       "application/octet-stream";
 
-    // Archived PDFs get an OBSOLETE stamp when opened
-    const shouldObsolete =
-      (file.is_archived || decoded.isArchived) && isPdfFile(file);
+    // Open stamps: archived → OBSOLETE; active + master flag → Master Copy
+    if (isPdfFile(file)) {
+      const isArchived = !!(file.is_archived || decoded.isArchived);
+      const wantsMaster = !!file.has_master_stamp && !isArchived;
 
-    if (shouldObsolete) {
-      try {
-        let pdfBuffer = await getFileBuffer(file);
-        pdfBuffer = await applyPdfStamp(pdfBuffer, "obsolete");
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
-        res.setHeader("Content-Length", pdfBuffer.length);
-        return res.send(pdfBuffer);
-      } catch (stampErr) {
-        console.error("❌ [open/direct] Obsolete stamp failed:", stampErr);
+      if (isArchived || wantsMaster) {
+        try {
+          let pdfBuffer = await getFileBuffer(file);
+          pdfBuffer = await applyPdfStamps(pdfBuffer, {
+            obsolete: isArchived,
+            master: wantsMaster,
+          });
+          res.setHeader("Content-Type", "application/pdf");
+          res.setHeader(
+            "Content-Disposition",
+            `inline; filename="${file.name}"`
+          );
+          res.setHeader("Content-Length", pdfBuffer.length);
+          return res.send(pdfBuffer);
+        } catch (stampErr) {
+          console.error("❌ [open/direct] Stamp failed:", stampErr);
+        }
       }
     }
 

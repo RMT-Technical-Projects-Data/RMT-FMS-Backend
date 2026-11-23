@@ -17,6 +17,7 @@ const {
   getTrashFolders,
   restoreFolder,
   permanentDeleteFolder,
+  getArchivedFoldersByParent,
 } = require("../services/folderService");
 
 const createfolder = async (req, res, next) => {
@@ -504,6 +505,27 @@ const permanentDeleteFolderController = async (req, res, next) => {
   }
 };
 
+const getArchivedFoldersController = async (req, res, next) => {
+  try {
+    const parentId =
+      req.query.parent_id !== undefined &&
+      req.query.parent_id !== null &&
+      req.query.parent_id !== "" &&
+      req.query.parent_id !== "null"
+        ? parseInt(req.query.parent_id, 10)
+        : null;
+    const folders = await getArchivedFoldersByParent(
+      req.user.id,
+      req.user.role,
+      parentId
+    );
+    res.json({ folders });
+  } catch (err) {
+    console.error("Error in getArchivedFoldersController:", err);
+    next(err);
+  }
+};
+
 module.exports = {
   createfolder,
   getfolder,
@@ -518,4 +540,5 @@ module.exports = {
   getTrashFoldersController,
   restoreFolderController,
   permanentDeleteFolderController,
+  getArchivedFoldersController,
 };

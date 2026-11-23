@@ -136,24 +136,46 @@ const cleanupTrash = async () => {
       .andWhere("deleted_at", "<", thirtyDaysAgo)
       .select("id", "name");
 
+    let foldersDeleted = 0;
+    let filesDeleted = 0;
+
     for (const folder of foldersToDelete) {
-      console.log(`🗑️ [CRON] Auto-deleting folder: ${folder.name} (${folder.id})`);
-      await permanentDeleteFolder(folder.id);
+      try {
+        console.log(`🗑️ [CRON] Auto-deleting folder: ${folder.name} (${folder.id})`);
+        await permanentDeleteFolder(folder.id);
+        foldersDeleted += 1;
+      } catch (folderErr) {
+        // Parent purge can remove children first — don't abort the whole job
+        console.warn(
+          `⚠️ [CRON] Skipped folder ${folder.name} (${folder.id}):`,
+          folderErr.message
+        );
+      }
     }
 
-    // 2. Find files to delete
+    // 2. Find files to delete (re-query after folders may have purged nested files)
     const filesToDelete = await knex("files")
       .where("is_deleted", true)
       .andWhere("deleted_at", "<", thirtyDaysAgo)
       .select("id", "name");
 
     for (const file of filesToDelete) {
-      console.log(`🗑️ [CRON] Auto-deleting file: ${file.name} (${file.id})`);
-      await permanentDeleteFile(file.id);
+      try {
+        console.log(`🗑️ [CRON] Auto-deleting file: ${file.name} (${file.id})`);
+        await permanentDeleteFile(file.id);
+        filesDeleted += 1;
+      } catch (fileErr) {
+        console.warn(
+          `⚠️ [CRON] Skipped file ${file.name} (${file.id}):`,
+          fileErr.message
+        );
+      }
     }
 
     if (foldersToDelete.length > 0 || filesToDelete.length > 0) {
-      console.log(`✅ [CRON] Cleanup complete. Deleted ${foldersToDelete.length} folders and ${filesToDelete.length} files.`);
+      console.log(
+        `✅ [CRON] Cleanup complete. Deleted ${foldersDeleted}/${foldersToDelete.length} folders and ${filesDeleted}/${filesToDelete.length} files.`
+      );
     } else {
       console.log("✅ [CRON] No items to clean up.");
     }

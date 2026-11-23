@@ -53,6 +53,19 @@ const deleteFileFromS3 = async (key) => {
 };
 
 /**
+ * Collect a readable stream into a Buffer.
+ * @param {import("stream").Readable} stream
+ * @returns {Promise<Buffer>}
+ */
+const streamToBuffer = async (stream) => {
+    const chunks = [];
+    for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+};
+
+/**
  * Get a file stream from S3 for downloading/streaming
  * @param {string} key - S3 object key
  * @returns {Promise<ReadableStream>}
@@ -66,9 +79,35 @@ const getFileStreamFromS3 = async (key) => {
         const response = await s3Client.send(command);
         return response.Body;
     } catch (err) {
+        // Fallback: If key has backslashes, try forward slashes
+        if (typeof key === 'string' && key.includes('\\')) {
+            try {
+                const normalizedKey = key.replace(/\\/g, '/');
+                console.log(`⚠️ [S3] Retry with normalized key: ${normalizedKey}`);
+                const command = new GetObjectCommand({
+                    Bucket: BUCKET_NAME,
+                    Key: normalizedKey,
+                });
+                const response = await s3Client.send(command);
+                return response.Body;
+            } catch (retryErr) {
+                console.error(`❌ [S3] Get Stream error (retry failed):`, retryErr);
+                throw err; // throw original error
+            }
+        }
         console.error(`❌ [S3] Get Stream error:`, err);
         throw err;
     }
+};
+
+/**
+ * Get full file contents from S3 as a Buffer (needed for PDF stamping).
+ * @param {string} key
+ * @returns {Promise<Buffer>}
+ */
+const getFileBufferFromS3 = async (key) => {
+    const stream = await getFileStreamFromS3(key);
+    return streamToBuffer(stream);
 };
 
 /**
@@ -115,6 +154,8 @@ module.exports = {
     uploadFileToS3,
     deleteFileFromS3,
     getFileStreamFromS3,
+    getFileBufferFromS3,
+    streamToBuffer,
     checkFileExistsInS3,
     copyFileInS3
 };

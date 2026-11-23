@@ -17,10 +17,16 @@ const {
   permanentDeleteFileController,
   openFile,
   moveFileController,
+  getDownloadAuditLogsController,
+  archiveFileController,
+  unarchiveFileController,
+  getArchivedFilesController,
 } = require("../controllers/fileController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
 const { getFileStreamFromS3 } = require("../services/s3Service");
+const { isPdfFile, applyPdfStamp } = require("../services/pdfStampService");
+const { getFileBuffer, getFileReadable } = require("../utils/fileContentHelper");
 const path = require("path"); // Add this if missing
 const fs = require("fs"); // Add this if missing
 const router = express.Router();
@@ -147,6 +153,11 @@ const setFileResourceInfo = (req, res, next) => {
     req.action = "edit";
   } else if (req.method === "POST" && req.path.includes("/move")) {
     req.action = "edit";
+  } else if (
+    req.method === "POST" &&
+    (req.path.includes("/archive") || req.path.includes("/unarchive"))
+  ) {
+    req.action = "edit";
   }
 
   next();
@@ -154,23 +165,51 @@ const setFileResourceInfo = (req, res, next) => {
 
 // Other routes remain the same...
 router.get("/download/:id", authMiddleware, setFileResourceInfo, downloadFile);
+
+// Super Admin — download activity audit log
+router.get("/audit/downloads", authMiddleware, getDownloadAuditLogsController);
+
+// Archive lifecycle (distinct from trash)
+router.get("/archived", authMiddleware, getArchivedFilesController);
+router.post(
+  "/:id/archive",
+  authMiddleware,
+  setFileResourceInfo,
+  checkPermission,
+  archiveFileController
+);
+router.post(
+  "/:id/unarchive",
+  authMiddleware,
+  setFileResourceInfo,
+  checkPermission,
+  unarchiveFileController
+);
+
 router.get("/open/:id/url", authMiddleware, async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.user.id;
+  const username = req.user.username || "Unknown";
 
   const file = await db("files").where({ id: fileId }).first();
-  if (!file) return res.status(404).json({ error: "File not found" });
+  if (!file || file.is_deleted) {
+    return res.status(404).json({ error: "File not found" });
+  }
 
-  // Generate short-lived signed token (valid 1 minute)
-  const tempToken = jwt.sign({ fileId, userId }, process.env.JWT_SECRET);
+  // Include archive flag so open/direct can apply OBSOLETE stamp
+  const tempToken = jwt.sign(
+    { fileId, userId, username, isArchived: !!file.is_archived },
+    process.env.JWT_SECRET,
+    { expiresIn: "5m" }
+  );
 
-  // Use dynamic host to support both localhost and production
   const protocol = req.protocol;
-  const host = req.get('host');
+  const host = req.get("host");
   const baseUrl = `${protocol}://${host}/api`;
   const openUrl = `${baseUrl}/files/open/direct/${fileId}?token=${tempToken}`;
-  res.json({ url: openUrl });
+  res.json({ url: openUrl, is_archived: !!file.is_archived });
 });
+
 router.get("/open/direct/:id", async (req, res) => {
   try {
     const { token } = req.query;
@@ -179,89 +218,48 @@ router.get("/open/direct/:id", async (req, res) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const fileId = parseInt(req.params.id);
 
-    if (decoded.fileId !== fileId)
+    if (decoded.fileId !== fileId) {
       return res.status(403).json({ error: "Invalid token for this file" });
+    }
 
     const file = await db("files").where({ id: fileId }).first();
+    if (!file || file.is_deleted) {
+      return res.status(404).json({ error: "File not found" });
+    }
 
-    if (!file) return res.status(404).json({ error: "File not found" });
+    const mime = require("mime-types");
+    const mimeType =
+      file.mime_type ||
+      (file.name?.toLowerCase().endsWith(".pdf")
+        ? "application/pdf"
+        : mime.lookup(file.name)) ||
+      "application/octet-stream";
 
-    // Determine if it's an S3 file or Local file
-    const isLocalFile =
-      file.file_path &&
-      (path.isAbsolute(file.file_path) ||
-        file.file_path.includes("uploads\\") ||
-        file.file_path.includes("uploads/"));
+    // Archived PDFs get an OBSOLETE stamp when opened
+    const shouldObsolete =
+      (file.is_archived || decoded.isArchived) && isPdfFile(file);
 
-    if (!isLocalFile) {
-      // --- S3 OPEN (STREAMING) ---
+    if (shouldObsolete) {
       try {
-        const s3Stream = await getFileStreamFromS3(file.file_path);
-
-        const mime = require("mime-types");
-        const mimeType =
-          file.mime_type ||
-          (file.file_path.endsWith(".pdf") ? "application/pdf" : mime.lookup(file.name)) ||
-          "application/octet-stream";
-
-        res.setHeader("Content-Type", mimeType);
+        let pdfBuffer = await getFileBuffer(file);
+        pdfBuffer = await applyPdfStamp(pdfBuffer, "obsolete");
+        res.setHeader("Content-Type", "application/pdf");
         res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
-
-        s3Stream.pipe(res);
-      } catch (s3Error) {
-        console.error(`❌ [open/direct] S3 Stream Error:`, s3Error);
-        return res.status(404).json({ error: "File not found in cloud storage" });
+        res.setHeader("Content-Length", pdfBuffer.length);
+        return res.send(pdfBuffer);
+      } catch (stampErr) {
+        console.error("❌ [open/direct] Obsolete stamp failed:", stampErr);
       }
-    } else {
-      // --- LOCAL OPEN (LEGACY) ---
-      // Robust path resolution strategy
-      let filePath = null;
-      const candidates = [];
+    }
 
-      if (file.file_path) {
-        // 1. Try exact path stored in DB
-        candidates.push(file.file_path);
-
-        // 2. Try resolving relative to CWD
-        candidates.push(path.resolve(process.cwd(), file.file_path));
-
-        // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
-        const normalized = file.file_path.replace(/\\/g, '/');
-        const uploadIndex = normalized.indexOf('uploads/');
-
-        if (uploadIndex !== -1) {
-          const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
-          candidates.push(path.join(process.cwd(), suffix));
-          candidates.push(path.join(__dirname, '..', suffix));
-        } else {
-          // If path doesn't contain 'uploads', try prepending it (legacy data)
-          candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
-        }
-      }
-
-      // Check all candidates
-      for (const p of candidates) {
-        if (fs.existsSync(p)) {
-          filePath = p;
-          break;
-        }
-      }
-
-      if (!filePath) {
-        console.error(`❌ [open/direct] File not found. Checked candidates:`, candidates);
-        return res.status(404).json({ error: "File not found on server" });
-      }
-
-      const mime = require("mime-types");
-      const mimeType =
-        file.mime_type ||
-        mime.lookup(filePath) ||
-        "application/octet-stream";
-
+    try {
+      const readable = await getFileReadable(file);
       res.setHeader("Content-Type", mimeType);
       res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
-
-      fs.createReadStream(filePath).pipe(res);
+      readable.pipe(res);
+    } catch (streamErr) {
+      console.error(`❌ [open/direct] Stream error:`, streamErr);
+      return res.status(404).json({ error: "File not found in storage" });
     }
   } catch (err) {
     console.error("❌ [open/direct] Error:", err);
@@ -327,6 +325,7 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       const allRootFiles = await db("files")
         .whereNull("folder_id")
         .andWhere("is_deleted", false)
+        .andWhere("is_archived", false)
         .select("*")
         .orderBy("created_at", "desc");
 
@@ -345,6 +344,7 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       .whereNull("files.folder_id")
       .where("files.created_by", userId)
       .andWhere("files.is_deleted", false)
+      .andWhere("files.is_archived", false)
       .select(
         "files.*",
         db.raw(
@@ -384,6 +384,7 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       .where("permissions.user_id", userId)
       .where("permissions.can_read", true)
       .andWhere("files.is_deleted", false)
+      .andWhere("files.is_archived", false)
       .select(
         "files.*",
         db.raw(

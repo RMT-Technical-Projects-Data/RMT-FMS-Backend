@@ -504,8 +504,12 @@ const restoreFolder = async (folderId) => {
 const permanentDeleteFolder = async (folderId) => {
   // Get folder info before deletion
   const folder = await knex("folders").where({ id: folderId }).first();
+  // Idempotent: parent cleanup may have already removed this folder
   if (!folder) {
-    throw new Error("Folder not found");
+    console.log(
+      `ℹ️ [permanentDeleteFolder] Folder ${folderId} already gone — skipping`
+    );
+    return { id: folderId, permanentlyDeleted: true, alreadyGone: true };
   }
 
   // Get all child folders

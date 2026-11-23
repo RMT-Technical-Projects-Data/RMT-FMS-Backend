@@ -18,8 +18,14 @@ const {
   restoreFile,
   permanentDeleteFile,
   moveFile,
+  archiveFile,
+  unarchiveFile,
+  getArchivedFiles,
 } = require("../services/fileService");
 const { getFileStreamFromS3, uploadFileToS3 } = require("../services/s3Service");
+const { logDownloadActivity, getDownloadAuditLogs } = require("../services/auditService");
+const { isPdfFile, applyPdfStamp } = require("../services/pdfStampService");
+const { getFileBuffer, getFileReadable } = require("../utils/fileContentHelper");
 
 
 const uploadFiles = async (req, res, next) => {
@@ -193,7 +199,8 @@ const uploadFolderWithFiles = async (req, res) => {
           size: file.size,
         });
 
-        const parts = relativePath.split("/").filter(Boolean);
+        const normalizedRelativePath = relativePath.replace(/\\/g, "/");
+        const parts = normalizedRelativePath.split("/").filter(Boolean);
         const fileName = parts.pop();
         const folderParts = parts;
 
@@ -333,6 +340,8 @@ const downloadFile = async (req, res, next) => {
     const fileId = parseInt(req.params.id);
     const userId = req.user.id;
     const userRole = req.user.role;
+    const username = req.user.username || "Unknown";
+    const downloadedAt = new Date();
 
     console.log(
       `📥 [downloadFile] Download request - File ID: ${fileId}, User ID: ${userId}, Role: ${userRole}`
@@ -343,125 +352,62 @@ const downloadFile = async (req, res, next) => {
     req.action = "download";
 
     const file = await getFileById(fileId);
-    console.log(
-      `📥 [downloadFile] File from DB:`,
-      file
-        ? {
-          id: file.id,
-          name: file.name,
-          created_by: file.created_by,
-          file_path: file.file_path,
-          is_deleted: file.is_deleted,
-        }
-        : "NOT FOUND"
-    );
 
     if (!file) {
-      console.log(
-        `❌ [downloadFile] File not found in database - ID: ${fileId}`
-      );
       return res.status(404).json({ error: "File not found" });
     }
 
-    // Check if file is deleted
+    // Deleted files are not downloadable; archived files remain downloadable (stamped)
     if (file.is_deleted) {
-      console.log(`❌ [downloadFile] File is deleted - ID: ${fileId}`);
       return res.status(404).json({ error: "File not found" });
     }
 
-    // Check if user owns the file or is super admin
-    // if (file.created_by !== userId && userRole !== "super_admin") {
-    //   console.log(`❌ [downloadFile] User ${userId} does not own file ${fileId} (owner: ${file.created_by})`);
-    //   return res.status(403).json({ error: "Permission denied" });
-    // }
-
-    // Check if file exists in local storage
     if (!file.file_path) {
-      console.log(`❌ [downloadFile] File path is null - ID: ${fileId}`);
       return res.status(404).json({ error: "File path not found" });
     }
 
-    // Determine if it's an S3 file or Local file
-    const path = require("path");
-    const fs = require("fs");
+    // Audit log — who downloaded what, and when
+    try {
+      await logDownloadActivity({
+        userId,
+        username,
+        fileId: file.id,
+        documentName: file.name,
+        ipAddress: req.ip || req.headers["x-forwarded-for"] || null,
+      });
+    } catch (auditErr) {
+      console.error("⚠️ [downloadFile] Audit log failed:", auditErr.message);
+    }
 
-    // Heuristic: If it has "uploads\" or is absolute path, it is likely local (Legacy)
-    // New S3 keys are "UserUploads/..."
-    const isLocalFile = file.file_path && (path.isAbsolute(file.file_path) || file.file_path.includes("uploads\\") || file.file_path.includes("uploads/"));
+    const contentType = file.mime_type || "application/octet-stream";
+    res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
-    if (!isLocalFile) {
-      // --- S3 DOWNLOAD ---
-      console.log(`📥 [downloadFile] Streaming from S3: ${file.file_path}`);
+    // Active PDFs → CONTROLLED only; archived PDFs → OBSOLETE only
+    if (isPdfFile(file)) {
       try {
-        const s3Stream = await getFileStreamFromS3(file.file_path);
-
-        // Set appropriate headers for download
-        res.setHeader("Content-Type", file.mime_type || "application/octet-stream");
-        res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
-
-        s3Stream.pipe(res);
-      } catch (s3Error) {
-        console.error(`❌ [downloadFile] S3 Download Error:`, s3Error);
-        return res.status(404).json({ error: "File not found in cloud storage" });
-      }
-    } else {
-      // --- LOCAL DOWNLOAD (LEGACY) ---
-      // Robust path resolution strategy (Standardized)
-      let filePath = null;
-      const candidates = [];
-
-      if (file.file_path) {
-        // 1. Try exact path stored in DB
-        candidates.push(file.file_path);
-
-        // 2. Try resolving relative to CWD
-        candidates.push(path.resolve(process.cwd(), file.file_path));
-
-        // 3. Try resolving 'uploads' relative to CWD (Handle moved/deployed mismatch)
-        const normalized = file.file_path.replace(/\\/g, '/');
-        const uploadIndex = normalized.indexOf('uploads/');
-
-        if (uploadIndex !== -1) {
-          const suffix = normalized.substring(uploadIndex); // e.g. "uploads/folder/file.ext"
-          candidates.push(path.join(process.cwd(), suffix));
-          candidates.push(path.join(__dirname, '..', suffix));
-        } else {
-          // If path doesn't contain 'uploads', try prepending it (legacy data)
-          candidates.push(path.join(process.cwd(), 'uploads', file.file_path));
-        }
-      }
-
-      // Check all candidates
-      for (const p of candidates) {
-        if (fs.existsSync(p)) {
-          filePath = p;
-          break;
-        }
-      }
-
-      if (!filePath) {
-        console.error(`❌ [downloadFile] File not found. Checked candidates:`, candidates);
-        return res.status(404).json({ error: "File not found on server" });
-      }
-
-      if (!fs.existsSync(filePath)) {
-        console.log(
-          `❌ [downloadFile] File does not exist on server - Path: ${file.file_path} (Resolved: ${filePath})`
+        let pdfBuffer = await getFileBuffer(file);
+        pdfBuffer = await applyPdfStamp(
+          pdfBuffer,
+          file.is_archived ? "obsolete" : "controlled",
+          { username, downloadedAt }
         );
-        return res.status(404).json({ error: "File not found on server" });
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Length", pdfBuffer.length);
+        return res.send(pdfBuffer);
+      } catch (stampErr) {
+        console.error("❌ [downloadFile] PDF stamp failed, falling back:", stampErr);
       }
+    }
 
-      console.log(
-        `✅ [downloadFile] File found, streaming - Path: ${filePath}`
-      );
-
-      // Set appropriate headers for download
-      res.setHeader("Content-Type", file.mime_type || "application/octet-stream");
-      res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
-
-      // Stream the file
-      const fileStream = fs.createReadStream(filePath);
-      fileStream.pipe(res);
+    // Non-PDF (or stamp fallback): stream original bytes
+    try {
+      const readable = await getFileReadable(file);
+      res.setHeader("Content-Type", contentType);
+      readable.pipe(res);
+    } catch (streamErr) {
+      console.error("❌ [downloadFile] Stream error:", streamErr);
+      return res.status(404).json({ error: "File not found in storage" });
     }
   } catch (err) {
     console.error("❌ [downloadFile] Error:", err);
@@ -630,6 +576,7 @@ const getFiles = async (req, res, next) => {
           .where("user_favourite_files.user_id", userId)
           .andWhere("files.folder_id", folder_id)
           .andWhere("files.is_deleted", false)
+          .andWhere("files.is_archived", false)
           .select("files.*")
           .orderBy("user_favourite_files.created_at", "desc");
         console.log(
@@ -648,6 +595,7 @@ const getFiles = async (req, res, next) => {
           .select("files.*", "folders.name as folder_name")
           .where("user_favourite_files.user_id", userId)
           .andWhere("files.is_deleted", false)
+          .andWhere("files.is_archived", false)
           .orderBy("user_favourite_files.created_at", "desc");
       }
     } else {
@@ -655,7 +603,9 @@ const getFiles = async (req, res, next) => {
       const userRole = req.user.role ? req.user.role.toLowerCase().trim() : "";
 
       if (userRole === 'super_admin') {
-        let query = knex("files").where("is_deleted", false);
+        let query = knex("files")
+          .where("is_deleted", false)
+          .andWhere("is_archived", false);
 
         if (folder_id && folder_id !== "null" && folder_id !== "undefined") {
           query.where("folder_id", folder_id);
@@ -678,7 +628,8 @@ const getFiles = async (req, res, next) => {
         })
         .where("permissions.user_id", userId)
         .where("permissions.can_read", true)
-        .andWhere("files.is_deleted", false);
+        .andWhere("files.is_deleted", false)
+        .andWhere("files.is_archived", false);
 
       if (folder_id) {
         permissionQuery.where("files.folder_id", folder_id);
@@ -706,16 +657,97 @@ const getFiles = async (req, res, next) => {
 const updateFileDetails = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
-    const { name } = req.body;
+    const { name, created_at } = req.body;
+    const userRole = (req.user.role || "").toLowerCase().trim();
 
     req.resourceType = "file";
     req.resourceId = fileId;
     req.action = "edit";
 
-    const updatedFile = await updateFile(fileId, { name });
+    const updates = {};
+
+    if (typeof name === "string" && name.trim()) {
+      updates.name = name.trim();
+    }
+
+    // Upload date editing is Super Admin only — never expose to regular users
+    if (created_at !== undefined) {
+      if (userRole !== "super_admin") {
+        return res.status(403).json({
+          error: "Only Super Admin can edit the document upload date",
+        });
+      }
+
+      const parsed = new Date(created_at);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: "Invalid upload date" });
+      }
+      updates.created_at = parsed;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+
+    const updatedFile = await updateFile(fileId, updates);
     res.json(updatedFile);
   } catch (err) {
     console.error("Error in updateFileDetails:", err);
+    next(err);
+  }
+};
+
+const getDownloadAuditLogsController = async (req, res, next) => {
+  try {
+    const role = (req.user.role || "").toLowerCase().trim();
+    if (role !== "super_admin") {
+      return res.status(403).json({ error: "Super Admin access required" });
+    }
+
+    const { limit, offset } = req.query;
+    const result = await getDownloadAuditLogs({ limit, offset });
+    res.json(result);
+  } catch (err) {
+    console.error("Error in getDownloadAuditLogsController:", err);
+    next(err);
+  }
+};
+
+const archiveFileController = async (req, res, next) => {
+  try {
+    const fileId = parseInt(req.params.id);
+    const file = await archiveFile(fileId);
+    res.json({ message: "File archived successfully", file });
+  } catch (err) {
+    if (err.message === "File not found") {
+      return res.status(404).json({ error: err.message });
+    }
+    if (err.message === "Cannot archive a deleted file") {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
+};
+
+const unarchiveFileController = async (req, res, next) => {
+  try {
+    const fileId = parseInt(req.params.id);
+    const file = await unarchiveFile(fileId);
+    res.json({ message: "File restored from archive", file });
+  } catch (err) {
+    if (err.message === "File not found") {
+      return res.status(404).json({ error: err.message });
+    }
+    next(err);
+  }
+};
+
+const getArchivedFilesController = async (req, res, next) => {
+  try {
+    const files = await getArchivedFiles(req.user.id, req.user.role);
+    res.json({ files });
+  } catch (err) {
+    console.error("Error in getArchivedFilesController:", err);
     next(err);
   }
 };
@@ -836,6 +868,10 @@ module.exports = {
   getTrashFilesController,
   restoreFileController,
   permanentDeleteFileController,
+  getDownloadAuditLogsController,
+  archiveFileController,
+  unarchiveFileController,
+  getArchivedFilesController,
   openFile,
   moveFileController,
 };

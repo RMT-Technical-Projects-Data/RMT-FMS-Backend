@@ -332,7 +332,8 @@ const getUserFiles = async (userId, folder_id = null) => {
     })
     .select("files.*", "folders.name as folder_name", knex.raw("CASE WHEN user_favourite_files.file_id IS NOT NULL THEN true ELSE false END as favourited"))
     .where("files.created_by", userId)
-    .andWhere("files.is_deleted", false);
+    .andWhere("files.is_deleted", false)
+    .andWhere("files.is_archived", false);
 
   if (folder_id) {
     query = query.where("files.folder_id", folder_id);
@@ -683,8 +684,12 @@ const moveFile = async (fileId, targetFolderIds, userId) => {
 const permanentDeleteFile = async (fileId) => {
   // Get file info before deletion
   const file = await knex("files").where({ id: fileId }).first();
+  // Idempotent: folder purge / prior cron pass may have already removed it
   if (!file) {
-    throw new Error("File not found");
+    console.log(
+      `ℹ️ [permanentDeleteFile] File ${fileId} already gone — skipping`
+    );
+    return { id: fileId, permanentlyDeleted: true, alreadyGone: true };
   }
 
   // Check if any other file uses the same path (deduplication check)
@@ -731,6 +736,58 @@ const permanentDeleteFile = async (fileId) => {
   return { id: fileId, permanentlyDeleted: true };
 };
 
+/**
+ * Soft-archive a document (keeps it openable with OBSOLETE stamp).
+ * Distinct from trash (is_deleted).
+ */
+const archiveFile = async (fileId) => {
+  const file = await knex("files").where({ id: fileId }).first();
+  if (!file) throw new Error("File not found");
+  if (file.is_deleted) throw new Error("Cannot archive a deleted file");
+  if (file.is_archived) return file;
+
+  await knex("files").where({ id: fileId }).update({
+    is_archived: true,
+    archived_at: new Date(),
+    updated_at: new Date(),
+  });
+
+  return knex("files").where({ id: fileId }).first();
+};
+
+const unarchiveFile = async (fileId) => {
+  const file = await knex("files").where({ id: fileId }).first();
+  if (!file) throw new Error("File not found");
+  if (file.is_deleted) throw new Error("Cannot unarchive a deleted file");
+
+  await knex("files").where({ id: fileId }).update({
+    is_archived: false,
+    archived_at: null,
+    updated_at: new Date(),
+  });
+
+  return knex("files").where({ id: fileId }).first();
+};
+
+/**
+ * List archived (non-deleted) files. Super Admin sees all; users see own.
+ */
+const getArchivedFiles = async (userId, userRole) => {
+  const query = knex("files")
+    .leftJoin("folders", "files.folder_id", "folders.id")
+    .select("files.*", "folders.name as folder_name")
+    .where("files.is_archived", true)
+    .andWhere("files.is_deleted", false)
+    .orderBy("files.archived_at", "desc");
+
+  const role = (userRole || "").toLowerCase().trim();
+  if (role !== "super_admin") {
+    query.andWhere("files.created_by", userId);
+  }
+
+  return query;
+};
+
 module.exports = {
   uploadFile,
   uploadFolder,
@@ -746,4 +803,7 @@ module.exports = {
   restoreFile,
   permanentDeleteFile,
   moveFile,
+  archiveFile,
+  unarchiveFile,
+  getArchivedFiles,
 };

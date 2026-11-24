@@ -421,6 +421,7 @@ const downloadFolder = async (req, res, next) => {
           try {
             buffer = await applyPdfStamps(buffer, {
               obsolete: !!file.is_archived,
+              master: !file.is_archived,
               controlled: !file.is_archived,
             });
           } catch (stampErr) {

@@ -7,16 +7,46 @@ const isPdfFile = (file) => {
   return mime.includes("pdf") || name.endsWith(".pdf");
 };
 
+const FONT_SIZE = 11;
+const PAD_X = 10;
+const PAD_Y = 7;
+
 /**
- * White fill, green border, green text — centered via returned box size.
+ * Use crop box when available so stamps center on the visible page area.
+ */
+const getPageBox = (page) => {
+  try {
+    if (typeof page.getCropBox === "function") {
+      const box = page.getCropBox();
+      if (box && box.width > 0 && box.height > 0) {
+        return {
+          x: box.x || 0,
+          y: box.y || 0,
+          width: box.width,
+          height: box.height,
+        };
+      }
+    }
+  } catch (_) {
+    // fall through
+  }
+  const { width, height } = page.getSize();
+  return { x: 0, y: 0, width, height };
+};
+
+const measureTag = (font, text) => {
+  const textWidth = font.widthOfTextAtSize(text, FONT_SIZE);
+  return {
+    boxW: textWidth + PAD_X * 2,
+    boxH: FONT_SIZE + PAD_Y * 2,
+  };
+};
+
+/**
+ * White fill, colored border + text.
  */
 const drawTagBox = (page, font, { text, x, y, border, fg, bg }) => {
-  const fontSize = 11;
-  const padX = 10;
-  const padY = 7;
-  const textWidth = font.widthOfTextAtSize(text, fontSize);
-  const boxW = textWidth + padX * 2;
-  const boxH = fontSize + padY * 2;
+  const { boxW, boxH } = measureTag(font, text);
 
   page.drawRectangle({
     x,
@@ -30,9 +60,9 @@ const drawTagBox = (page, font, { text, x, y, border, fg, bg }) => {
   });
 
   page.drawText(text, {
-    x: x + padX,
-    y: y + padY,
-    size: fontSize,
+    x: x + PAD_X,
+    y: y + PAD_Y,
+    size: FONT_SIZE,
     font,
     color: fg,
   });
@@ -40,22 +70,32 @@ const drawTagBox = (page, font, { text, x, y, border, fg, bg }) => {
   return { boxW, boxH };
 };
 
-const measureTag = (font, text) => {
-  const fontSize = 11;
-  const padX = 10;
-  const padY = 7;
-  const textWidth = font.widthOfTextAtSize(text, fontSize);
-  return {
-    boxW: textWidth + padX * 2,
-    boxH: fontSize + padY * 2,
-  };
+const drawTopCenter = (page, font, text, colors) => {
+  const box = getPageBox(page);
+  const { boxW, boxH } = measureTag(font, text);
+  drawTagBox(page, font, {
+    text,
+    x: box.x + (box.width - boxW) / 2,
+    y: box.y + box.height - boxH - 24,
+    ...colors,
+  });
+};
+
+const drawBottomCenter = (page, font, text, colors) => {
+  const box = getPageBox(page);
+  const { boxW } = measureTag(font, text);
+  drawTagBox(page, font, {
+    text,
+    x: box.x + (box.width - boxW) / 2,
+    y: box.y + 24,
+    ...colors,
+  });
 };
 
 /**
  * Apply PDF document-control stamps.
- * Style (all): green text, white fill, green border
- * - master: "Master Copy" — first page top-center
- * - controlled: "Controlled Copy" — every page bottom-center
+ * - master: "MASTER COPY" — first page top-center
+ * - controlled: "CONTROLLED COPY" — every page bottom-center
  * - obsolete: "OBSOLETE" — first + last page top-center
  */
 const applyPdfStamps = async (pdfBuffer, options = {}) => {
@@ -76,13 +116,7 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
   const last = pages[pages.length - 1];
 
   if (master) {
-    const { width, height } = first.getSize();
-    const label = "MASTER COPY";
-    const { boxW, boxH } = measureTag(font, label);
-    drawTagBox(first, font, {
-      text: label,
-      x: (width - boxW) / 2,
-      y: height - boxH - 24,
+    drawTopCenter(first, font, "MASTER COPY", {
       bg: white,
       border: green,
       fg: green,
@@ -91,13 +125,7 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
 
   if (controlled) {
     for (const page of pages) {
-      const { width } = page.getSize();
-      const label = "CONTROLLED COPY";
-      const { boxW } = measureTag(font, label);
-      drawTagBox(page, font, {
-        text: label,
-        x: (width - boxW) / 2,
-        y: 24,
+      drawBottomCenter(page, font, "CONTROLLED COPY", {
         bg: white,
         border: blue,
         fg: blue,
@@ -106,27 +134,13 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
   }
 
   if (obsolete) {
-    const label = "OBSOLETE";
-    const { boxW, boxH } = measureTag(font, label);
-
-    {
-      const { width, height } = first.getSize();
-      drawTagBox(first, font, {
-        text: label,
-        x: (width - boxW) / 2,
-        y: height - boxH - 24,
-        bg: white,
-        border: red,
-        fg: red,
-      });
-    }
-
+    drawTopCenter(first, font, "OBSOLETE", {
+      bg: white,
+      border: red,
+      fg: red,
+    });
     if (last !== first) {
-      const { width, height } = last.getSize();
-      drawTagBox(last, font, {
-        text: label,
-        x: (width - boxW) / 2,
-        y: height - boxH - 24,
+      drawTopCenter(last, font, "OBSOLETE", {
         bg: white,
         border: red,
         fg: red,
@@ -144,7 +158,7 @@ const applyPdfStamp = async (pdfBuffer, stampType) => {
     return applyPdfStamps(pdfBuffer, { obsolete: true });
   }
   if (stampType === "controlled") {
-    return applyPdfStamps(pdfBuffer, { controlled: true });
+    return applyPdfStamps(pdfBuffer, { controlled: true, master: true });
   }
   if (stampType === "master") {
     return applyPdfStamps(pdfBuffer, { master: true });

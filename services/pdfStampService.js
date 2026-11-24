@@ -7,7 +7,10 @@ const isPdfFile = (file) => {
   return mime.includes("pdf") || name.endsWith(".pdf");
 };
 
-const drawTagBox = (page, font, { text, x, y, bg, fg }) => {
+/**
+ * White fill, green border, green text — centered via returned box size.
+ */
+const drawTagBox = (page, font, { text, x, y, border, fg, bg }) => {
   const fontSize = 11;
   const padX = 10;
   const padY = 7;
@@ -21,7 +24,9 @@ const drawTagBox = (page, font, { text, x, y, bg, fg }) => {
     width: boxW,
     height: boxH,
     color: bg,
-    opacity: 0.95,
+    borderColor: border,
+    borderWidth: 1.5,
+    opacity: 1,
   });
 
   page.drawText(text, {
@@ -35,11 +40,23 @@ const drawTagBox = (page, font, { text, x, y, bg, fg }) => {
   return { boxW, boxH };
 };
 
+const measureTag = (font, text) => {
+  const fontSize = 11;
+  const padX = 10;
+  const padY = 7;
+  const textWidth = font.widthOfTextAtSize(text, fontSize);
+  return {
+    boxW: textWidth + padX * 2,
+    boxH: fontSize + padY * 2,
+  };
+};
+
 /**
  * Apply PDF document-control stamps.
- * - master: green "Master Copy" — first page top-right
- * - controlled: blue "Controlled Copy" — bottom-right
- * - obsolete: red "OBSOLETE" — first page + last page end/right
+ * Style (all): green text, white fill, green border
+ * - master: "Master Copy" — first page top-center
+ * - controlled: "Controlled Copy" — every page bottom-center
+ * - obsolete: "OBSOLETE" — first + last page top-center
  */
 const applyPdfStamps = async (pdfBuffer, options = {}) => {
   const { master = false, controlled = false, obsolete = false } = options;
@@ -51,9 +68,8 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
   if (pages.length === 0) return pdfBuffer;
 
   const green = rgb(0.12, 0.55, 0.25);
-  const blue = rgb(0.08, 0.28, 0.65);
-  const red = rgb(0.75, 0.12, 0.12);
   const white = rgb(1, 1, 1);
+  const tagStyle = { bg: white, border: green, fg: green };
 
   const first = pages[0];
   const last = pages[pages.length - 1];
@@ -61,62 +77,50 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
   if (master) {
     const { width, height } = first.getSize();
     const label = "Master Copy";
-    const textWidth = font.widthOfTextAtSize(label, 11);
-    const boxW = textWidth + 20;
+    const { boxW, boxH } = measureTag(font, label);
     drawTagBox(first, font, {
       text: label,
-      x: width - boxW - 28,
-      y: height - 42,
-      bg: green,
-      fg: white,
+      x: (width - boxW) / 2,
+      y: height - boxH - 24,
+      ...tagStyle,
     });
   }
 
   if (controlled) {
-    // Bottom-right blue tag (download)
     for (const page of pages) {
       const { width } = page.getSize();
       const label = "Controlled Copy";
-      const textWidth = font.widthOfTextAtSize(label, 11);
-      const boxW = textWidth + 20;
+      const { boxW } = measureTag(font, label);
       drawTagBox(page, font, {
         text: label,
-        x: width - boxW - 28,
+        x: (width - boxW) / 2,
         y: 24,
-        bg: blue,
-        fg: white,
+        ...tagStyle,
       });
     }
   }
 
   if (obsolete) {
-    // First page OBSOLETE (top-right)
+    const label = "OBSOLETE";
+    const { boxW, boxH } = measureTag(font, label);
+
     {
       const { width, height } = first.getSize();
-      const label = "OBSOLETE";
-      const textWidth = font.widthOfTextAtSize(label, 11);
-      const boxW = textWidth + 20;
       drawTagBox(first, font, {
         text: label,
-        x: width - boxW - 28,
-        y: height - 42,
-        bg: red,
-        fg: white,
+        x: (width - boxW) / 2,
+        y: height - boxH - 24,
+        ...tagStyle,
       });
     }
 
-    // Last page OBSOLETE at end / right side (bottom-right)
-    {
-      const { width } = last.getSize();
-      const label = "OBSOLETE";
-      const textWidth = font.widthOfTextAtSize(label, 11);
-      const boxW = textWidth + 20;
+    if (last !== first) {
+      const { width, height } = last.getSize();
       drawTagBox(last, font, {
         text: label,
-        x: width - boxW - 28,
-        y: 24,
-        bg: red,
-        fg: white,
+        x: (width - boxW) / 2,
+        y: height - boxH - 24,
+        ...tagStyle,
       });
     }
   }

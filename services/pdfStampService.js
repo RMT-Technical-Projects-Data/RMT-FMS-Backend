@@ -77,7 +77,7 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
 
   if (master) {
     const { width, height } = first.getSize();
-    const label = "Master Copy";
+    const label = "MASTER COPY";
     const { boxW, boxH } = measureTag(font, label);
     drawTagBox(first, font, {
       text: label,
@@ -92,7 +92,7 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
   if (controlled) {
     for (const page of pages) {
       const { width } = page.getSize();
-      const label = "Controlled Copy";
+      const label = "CONTROLLED COPY";
       const { boxW } = measureTag(font, label);
       drawTagBox(page, font, {
         text: label,

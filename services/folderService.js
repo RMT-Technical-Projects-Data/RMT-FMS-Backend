@@ -149,22 +149,162 @@ const updateFolder = async (folderId, updates) => {
   }
 };
 
-const deleteFolder = async (folderId) => {
-  // Soft delete folder and cascade to children and files
-  // Mark current folder
-  await knex("folders")
-    .where({ id: folderId })
-    .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
+/**
+ * Find an already-deleted folder with the same name under the same trash parent.
+ */
+const findDeletedFolderTwin = async (
+  trx,
+  name,
+  parentId,
+  createdBy,
+  excludeId
+) => {
+  let q = trx("folders")
+    .where({ name, is_deleted: true })
+    .whereNot("id", excludeId);
 
-  // Mark files in this folder
-  await knex("files")
-    .where({ folder_id: folderId })
-    .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
+  if (createdBy != null) {
+    q = q.andWhere("created_by", createdBy);
+  }
 
-  // Recurse into subfolders
-  const subfolders = await knex("folders").where({ parent_id: folderId });
-  for (const subfolder of subfolders) {
-    await deleteFolder(subfolder.id);
+  if (parentId == null) {
+    q = q.whereNull("parent_id");
+  } else {
+    q = q.andWhere("parent_id", parentId);
+  }
+
+  return q.first();
+};
+
+/**
+ * Map a live parent folder to its existing trash counterpart (by name path),
+ * so re-deletes merge into the original trash tree instead of duplicating it.
+ */
+const resolveTrashParentId = async (trx, parentId, createdBy) => {
+  if (parentId == null) return null;
+
+  const parent = await trx("folders").where({ id: parentId }).first();
+  if (!parent) return null;
+  if (parent.is_deleted) return parent.id;
+
+  const trashGrandparentId = await resolveTrashParentId(
+    trx,
+    parent.parent_id,
+    createdBy ?? parent.created_by
+  );
+
+  const twin = await findDeletedFolderTwin(
+    trx,
+    parent.name,
+    trashGrandparentId,
+    createdBy ?? parent.created_by,
+    parent.id
+  );
+
+  // Prefer trash twin; otherwise keep current parent id
+  return twin ? twin.id : parent.id;
+};
+
+const deleteFolder = async (folderId, trxExternal = null) => {
+  const ownsTrx = !trxExternal;
+  const trx = trxExternal || (await knex.transaction());
+
+  try {
+    const folder = await trx("folders").where({ id: folderId }).first();
+    if (!folder) {
+      if (ownsTrx) await trx.commit();
+      return;
+    }
+
+    // Already in trash — nothing to do
+    if (folder.is_deleted) {
+      if (ownsTrx) await trx.commit();
+      return;
+    }
+
+    // Delete/merge live children first so nested paths resolve correctly
+    const liveChildren = await trx("folders")
+      .where({ parent_id: folderId })
+      .andWhere("is_deleted", false)
+      .select("id");
+
+    for (const child of liveChildren) {
+      await deleteFolder(child.id, trx);
+    }
+
+    const trashParentId = await resolveTrashParentId(
+      trx,
+      folder.parent_id,
+      folder.created_by
+    );
+
+    const existingTrash = await findDeletedFolderTwin(
+      trx,
+      folder.name,
+      trashParentId,
+      folder.created_by,
+      folder.id
+    );
+
+    const now = new Date();
+
+    if (existingTrash) {
+      // Merge into the already-present trash folder (no duplicate)
+      await trx("files").where({ folder_id: folder.id }).update({
+        folder_id: existingTrash.id,
+        is_deleted: true,
+        deleted_at: now,
+        updated_at: now,
+      });
+
+      // Re-parent any leftover children under the trash twin
+      await trx("folders").where({ parent_id: folder.id }).update({
+        parent_id: existingTrash.id,
+        updated_at: now,
+      });
+
+      // Clean related rows, then remove the duplicate live folder row
+      await trx("permissions")
+        .where({ resource_id: folder.id, resource_type: "folder" })
+        .del();
+
+      try {
+        await trx("user_favourite_folders").where({ folder_id: folder.id }).del();
+      } catch (_) {
+        // table may not exist in some envs
+      }
+
+      await trx("folders").where({ id: folder.id }).del();
+      console.log(
+        `🗑️ [deleteFolder] Merged "${folder.name}" (${folder.id}) into trash folder ${existingTrash.id}`
+      );
+    } else {
+      // No trash twin — soft-delete and attach under the resolved trash parent
+      const updates = {
+        is_deleted: true,
+        deleted_at: now,
+        updated_at: now,
+      };
+      if ((folder.parent_id ?? null) !== (trashParentId ?? null)) {
+        updates.parent_id = trashParentId;
+      }
+
+      await trx("folders").where({ id: folder.id }).update(updates);
+
+      await trx("files")
+        .where({ folder_id: folder.id })
+        .andWhere("is_deleted", false)
+        .update({
+          is_deleted: true,
+          deleted_at: now,
+          updated_at: now,
+        });
+    }
+
+    if (ownsTrx) await trx.commit();
+  } catch (err) {
+    if (ownsTrx) await trx.rollback();
+    throw err;
   }
 };
 
@@ -726,4 +866,6 @@ module.exports = {
   restoreFolder,
   permanentDeleteFolder,
   getArchivedFoldersByParent,
+  findDeletedFolderTwin,
+  resolveTrashParentId,
 };

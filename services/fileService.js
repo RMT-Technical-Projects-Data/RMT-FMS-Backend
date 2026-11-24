@@ -3,6 +3,10 @@ const knex = require("../config/db");
 const path = require("path");
 const fs = require("fs");
 const { uploadFileToS3, deleteFileFromS3, copyFileInS3 } = require("./s3Service");
+const {
+  findDeletedFolderTwin,
+  resolveTrashParentId,
+} = require("./folderService");
 
 const uploadFile = async (file, folderId, userId, customName = null) => {
   console.log("=== UPLOAD FILE SERVICE START ===");
@@ -366,6 +370,36 @@ const deleteFile = async (fileId) => {
   if (!file) throw new Error("File not found");
 
   const userId = file.created_by;
+  const now = new Date();
+
+  // Prefer existing trash folder twin so structure merges on re-delete
+  let targetFolderId = file.folder_id;
+  try {
+    if (file.folder_id) {
+      const folder = await knex("folders").where({ id: file.folder_id }).first();
+      if (folder && !folder.is_deleted) {
+        const trashParentId = await resolveTrashParentId(
+          knex,
+          folder.parent_id,
+          folder.created_by
+        );
+        const twin = await findDeletedFolderTwin(
+          knex,
+          folder.name,
+          trashParentId,
+          folder.created_by,
+          folder.id
+        );
+        if (twin) targetFolderId = twin.id;
+      }
+    }
+  } catch (mapErr) {
+    console.warn(
+      "⚠️ [deleteFile] Trash folder remap skipped:",
+      mapErr.message
+    );
+    targetFolderId = file.folder_id;
+  }
 
   // S3 Move-to-Trash Logic
   // Determine if it's an S3 file
@@ -386,14 +420,15 @@ const deleteFile = async (fileId) => {
       // 2. Delete original
       await deleteFileFromS3(file.file_path);
 
-      // 3. Update DB with new path
+      // 3. Update DB with new path (+ optional folder remap into trash twin)
       await knex("files")
         .where({ id: fileId })
         .update({
           file_path: trashKey,
+          folder_id: targetFolderId,
           is_deleted: true,
-          deleted_at: new Date(),
-          updated_at: new Date()
+          deleted_at: now,
+          updated_at: now,
         });
 
       return; // Exit as we handled the update
@@ -407,7 +442,12 @@ const deleteFile = async (fileId) => {
   // Legacy/Local Soft Delete (Just DB Flag)
   await knex("files")
     .where({ id: fileId })
-    .update({ is_deleted: true, deleted_at: new Date(), updated_at: new Date() });
+    .update({
+      folder_id: targetFolderId,
+      is_deleted: true,
+      deleted_at: now,
+      updated_at: now,
+    });
 };
 
 // ... existing toggleFileFavourite ...

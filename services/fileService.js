@@ -539,24 +539,106 @@ const getTrashFiles = async (userId, folderId = null) => {
   }
 };
 
+/**
+ * Ensure the folder path for a trashed file exists again in the live tree.
+ * Restores only ancestor folders (not sibling files/folders).
+ * If a live folder with the same name already exists at that level
+ * (e.g. from a previous single-file restore), reuse it so later
+ * restores land in the same preserved structure.
+ */
+const ensureLiveFolderAncestors = async (trx, folderId) => {
+  if (!folderId) return null;
+
+  const folder = await trx("folders").where({ id: folderId }).first();
+  if (!folder) return null;
+
+  const resolvedParentId = await ensureLiveFolderAncestors(
+    trx,
+    folder.parent_id
+  );
+
+  let liveQuery = trx("folders")
+    .where({ name: folder.name, is_deleted: false });
+
+  if (resolvedParentId == null) {
+    liveQuery = liveQuery.whereNull("parent_id");
+  } else {
+    liveQuery = liveQuery.andWhere("parent_id", resolvedParentId);
+  }
+
+  if (folder.created_by != null) {
+    liveQuery = liveQuery.andWhere("created_by", folder.created_by);
+  }
+
+  const liveMatch = await liveQuery.first();
+  if (liveMatch) {
+    return liveMatch.id;
+  }
+
+  if (!folder.is_deleted) {
+    const parentChanged =
+      (folder.parent_id ?? null) !== (resolvedParentId ?? null);
+    if (parentChanged) {
+      await trx("folders")
+        .where({ id: folder.id })
+        .update({ parent_id: resolvedParentId, updated_at: new Date() });
+    }
+    return folder.id;
+  }
+
+  // Undelete this folder only — do not cascade to children or files
+  const updates = {
+    is_deleted: false,
+    deleted_at: null,
+    updated_at: new Date(),
+  };
+  const parentChanged =
+    (folder.parent_id ?? null) !== (resolvedParentId ?? null);
+  if (parentChanged) {
+    updates.parent_id = resolvedParentId;
+  }
+
+  await trx("folders").where({ id: folder.id }).update(updates);
+  console.log(
+    `♻️ [ensureLiveFolderAncestors] Restored folder path node: ${folder.name} (${folder.id})`
+  );
+  return folder.id;
+};
+
 // ... restoreFile ...
 const restoreFile = async (fileId) => {
   const trx = await knex.transaction();
   try {
     const file = await trx("files").where({ id: fileId }).first();
     if (!file) throw new Error("File not found");
+    if (!file.is_deleted) {
+      throw new Error("File is not in trash");
+    }
 
     const userId = file.created_by;
 
-    // Check collision
-    const existingFile = await trx("files")
+    // Rebuild / reuse live ancestor folders for this file only
+    const targetFolderId = await ensureLiveFolderAncestors(
+      trx,
+      file.folder_id
+    );
+
+    // Check collision in the destination folder
+    let existingQuery = trx("files")
       .where({
         name: file.name,
-        folder_id: file.folder_id,
         created_by: file.created_by,
         is_deleted: false,
       })
-      .first();
+      .whereNot("id", fileId);
+
+    if (targetFolderId == null) {
+      existingQuery = existingQuery.whereNull("folder_id");
+    } else {
+      existingQuery = existingQuery.andWhere("folder_id", targetFolderId);
+    }
+
+    const existingFile = await existingQuery.first();
 
     if (existingFile) {
       throw new Error("File already exists");
@@ -567,13 +649,7 @@ const restoreFile = async (fileId) => {
 
     if (isS3Trash) {
       try {
-        const folderId = file.folder_id;
-        let folderPath = "";
-        if (folderId) {
-          folderPath = `${folderId}/`;
-        } else {
-          folderPath = "root/";
-        }
+        const folderPath = targetFolderId ? `${targetFolderId}/` : "root/";
         // Reconstruct original key: UserUploads/{userId}/{folderPath}/{fileName}
         const originalKey = `UserUploads/${userId}/${folderPath}${file.name}`;
 
@@ -585,19 +661,23 @@ const restoreFile = async (fileId) => {
         // 2. Delete from Trash
         await deleteFileFromS3(file.file_path);
 
-        // 3. Update DB
+        // 3. Update DB (including remapped folder if path was reused)
         await trx("files")
           .where({ id: fileId })
           .update({
             file_path: originalKey,
+            folder_id: targetFolderId,
             is_deleted: false,
             deleted_at: null,
-            updated_at: new Date()
+            updated_at: new Date(),
           });
 
         await trx.commit();
-        return { id: fileId, restored: true };
-
+        return {
+          id: fileId,
+          restored: true,
+          folder_id: targetFolderId,
+        };
       } catch (err) {
         console.error(`❌ [restoreFile] Error restoring from S3 Trash:`, err);
         // If S3 fails, we probably shouldn't un-flag it in DB
@@ -608,10 +688,19 @@ const restoreFile = async (fileId) => {
     // Local/Legacy Restore
     await trx("files")
       .where({ id: fileId })
-      .update({ is_deleted: false, deleted_at: null, updated_at: new Date() });
+      .update({
+        folder_id: targetFolderId,
+        is_deleted: false,
+        deleted_at: null,
+        updated_at: new Date(),
+      });
 
     await trx.commit();
-    return { id: fileId, restored: true };
+    return {
+      id: fileId,
+      restored: true,
+      folder_id: targetFolderId,
+    };
   } catch (error) {
     await trx.rollback();
     throw error;

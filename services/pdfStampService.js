@@ -68,8 +68,9 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
   if (pages.length === 0) return pdfBuffer;
 
   const green = rgb(0.12, 0.55, 0.25);
+  const blue = rgb(0.08, 0.35, 0.75);
+  const red = rgb(0.75, 0.12, 0.12);
   const white = rgb(1, 1, 1);
-  const tagStyle = { bg: white, border: green, fg: green };
 
   const first = pages[0];
   const last = pages[pages.length - 1];
@@ -82,7 +83,9 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
       text: label,
       x: (width - boxW) / 2,
       y: height - boxH - 24,
-      ...tagStyle,
+      bg: white,
+      border: green,
+      fg: green,
     });
   }
 
@@ -95,7 +98,9 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
         text: label,
         x: (width - boxW) / 2,
         y: 24,
-        ...tagStyle,
+        bg: white,
+        border: blue,
+        fg: blue,
       });
     }
   }
@@ -110,7 +115,9 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
         text: label,
         x: (width - boxW) / 2,
         y: height - boxH - 24,
-        ...tagStyle,
+        bg: white,
+        border: red,
+        fg: red,
       });
     }
 
@@ -120,7 +127,9 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
         text: label,
         x: (width - boxW) / 2,
         y: height - boxH - 24,
-        ...tagStyle,
+        bg: white,
+        border: red,
+        fg: red,
       });
     }
   }

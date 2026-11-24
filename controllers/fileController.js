@@ -922,6 +922,90 @@ const moveFileController = async (req, res, next) => {
   }
 };
 
+/**
+ * Global search across files + folders the user can access.
+ * GET /files/search?q=
+ */
+const searchFilesAndFolders = async (req, res, next) => {
+  try {
+    const raw = (req.query.q || "").toString().trim();
+    if (!raw) {
+      return res.json({ files: [], folders: [] });
+    }
+
+    // Limit length; strip LIKE wildcards from user input
+    const term = raw.slice(0, 100).replace(/[%_]/g, "");
+    if (!term) {
+      return res.json({ files: [], folders: [] });
+    }
+    const like = `%${term}%`;
+    const userId = req.user.id;
+    const userRole = (req.user.role || "").toLowerCase().trim();
+    const isSuperAdmin = userRole === "super_admin";
+
+    let filesQuery = knex("files")
+      .leftJoin("folders", "files.folder_id", "folders.id")
+      .select("files.*", "folders.name as folder_name")
+      .where("files.is_deleted", false)
+      .andWhere("files.is_archived", false)
+      .andWhere(function () {
+        this.where("files.name", "like", like).orWhere(
+          "files.original_name",
+          "like",
+          like
+        );
+      })
+      .orderBy("files.name", "asc")
+      .limit(100);
+
+    let foldersQuery = knex("folders")
+      .select("folders.*")
+      .where("folders.is_deleted", false)
+      .andWhere("folders.name", "like", like)
+      .orderBy("folders.name", "asc")
+      .limit(100);
+
+    if (!isSuperAdmin) {
+      filesQuery = filesQuery.andWhere(function () {
+        this.where("files.created_by", userId)
+          .orWhereExists(function () {
+            this.select(knex.raw("1"))
+              .from("permissions")
+              .whereRaw("permissions.resource_id = files.id")
+              .andWhere("permissions.resource_type", "file")
+              .andWhere("permissions.user_id", userId)
+              .andWhere("permissions.can_read", true);
+          })
+          .orWhereExists(function () {
+            this.select(knex.raw("1"))
+              .from("permissions")
+              .whereRaw("permissions.resource_id = files.folder_id")
+              .andWhere("permissions.resource_type", "folder")
+              .andWhere("permissions.user_id", userId)
+              .andWhere("permissions.can_read", true);
+          });
+      });
+
+      foldersQuery = foldersQuery.andWhere(function () {
+        this.where("folders.created_by", userId).orWhereExists(function () {
+          this.select(knex.raw("1"))
+            .from("permissions")
+            .whereRaw("permissions.resource_id = folders.id")
+            .andWhere("permissions.resource_type", "folder")
+            .andWhere("permissions.user_id", userId)
+            .andWhere("permissions.can_read", true);
+        });
+      });
+    }
+
+    const [files, folders] = await Promise.all([filesQuery, foldersQuery]);
+    res.json({ files, folders });
+  } catch (err) {
+    console.error("Error in searchFilesAndFolders:", err);
+    next(err);
+  }
+};
+
 module.exports = {
   uploadFolderWithFiles,
   downloadFile,
@@ -942,4 +1026,5 @@ module.exports = {
   getArchivedFoldersController,
   openFile,
   moveFileController,
+  searchFilesAndFolders,
 };

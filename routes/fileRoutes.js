@@ -23,6 +23,7 @@ const {
   getArchivedFilesController,
   getArchivedFoldersController,
   setMasterStampBatchController,
+  searchFilesAndFolders,
 } = require("../controllers/fileController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
@@ -177,6 +178,9 @@ router.post(
   authMiddleware,
   setMasterStampBatchController
 );
+
+// Global file + folder search
+router.get("/search", authMiddleware, searchFilesAndFolders);
 
 // Archive lifecycle (distinct from trash)
 router.get("/archived", authMiddleware, getArchivedFilesController);

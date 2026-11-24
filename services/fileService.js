@@ -540,11 +540,11 @@ const getTrashFiles = async (userId, folderId = null) => {
 };
 
 /**
- * Ensure the folder path for a trashed file exists again in the live tree.
- * Restores only ancestor folders (not sibling files/folders).
- * If a live folder with the same name already exists at that level
- * (e.g. from a previous single-file restore), reuse it so later
- * restores land in the same preserved structure.
+ * Ensure a LIVE folder path exists for a trashed file (dashboard).
+ * - Reuses an existing live folder with the same name at that level
+ * - If the trash folder itself is still live, reuse it
+ * - Otherwise CREATE a live twin — never undelete trash folders,
+ *   so the trash tree structure stays intact for remaining items
  */
 const ensureLiveFolderAncestors = async (trx, folderId) => {
   if (!folderId) return null;
@@ -557,8 +557,10 @@ const ensureLiveFolderAncestors = async (trx, folderId) => {
     folder.parent_id
   );
 
-  let liveQuery = trx("folders")
-    .where({ name: folder.name, is_deleted: false });
+  let liveQuery = trx("folders").where({
+    name: folder.name,
+    is_deleted: false,
+  });
 
   if (resolvedParentId == null) {
     liveQuery = liveQuery.whereNull("parent_id");
@@ -575,34 +577,32 @@ const ensureLiveFolderAncestors = async (trx, folderId) => {
     return liveMatch.id;
   }
 
-  if (!folder.is_deleted) {
-    const parentChanged =
-      (folder.parent_id ?? null) !== (resolvedParentId ?? null);
-    if (parentChanged) {
-      await trx("folders")
-        .where({ id: folder.id })
-        .update({ parent_id: resolvedParentId, updated_at: new Date() });
-    }
+  // Original folder still live and already under the resolved parent
+  if (
+    !folder.is_deleted &&
+    (folder.parent_id ?? null) === (resolvedParentId ?? null)
+  ) {
     return folder.id;
   }
 
-  // Undelete this folder only — do not cascade to children or files
-  const updates = {
+  // Keep the deleted folder in trash; create a live twin for dashboard
+  const insertRow = {
+    name: folder.name,
+    parent_id: resolvedParentId,
+    created_by: folder.created_by,
+    created_at: new Date(),
+    updated_at: new Date(),
     is_deleted: false,
     deleted_at: null,
-    updated_at: new Date(),
   };
-  const parentChanged =
-    (folder.parent_id ?? null) !== (resolvedParentId ?? null);
-  if (parentChanged) {
-    updates.parent_id = resolvedParentId;
-  }
 
-  await trx("folders").where({ id: folder.id }).update(updates);
+  const inserted = await trx("folders").insert(insertRow);
+  const newId = Array.isArray(inserted) ? inserted[0] : inserted;
+
   console.log(
-    `♻️ [ensureLiveFolderAncestors] Restored folder path node: ${folder.name} (${folder.id})`
+    `♻️ [ensureLiveFolderAncestors] Created live twin "${folder.name}" (${newId}) for trash folder ${folder.id}`
   );
-  return folder.id;
+  return newId;
 };
 
 // ... restoreFile ...

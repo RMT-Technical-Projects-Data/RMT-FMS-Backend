@@ -144,7 +144,7 @@ const applyPdfStamp = async (pdfBuffer, stampType) => {
     return applyPdfStamps(pdfBuffer, { obsolete: true });
   }
   if (stampType === "controlled") {
-    return applyPdfStamps(pdfBuffer, { controlled: true, master: true });
+    return applyPdfStamps(pdfBuffer, { controlled: true });
   }
   if (stampType === "master") {
     return applyPdfStamps(pdfBuffer, { master: true });

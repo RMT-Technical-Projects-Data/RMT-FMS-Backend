@@ -416,12 +416,12 @@ const downloadFolder = async (req, res, next) => {
       try {
         let buffer = await getFileBuffer(file);
 
-        // Apply download stamps for PDFs inside the zip
+        // Folder ZIP uses same download stamp rules as single-file download
         if (isPdfFile(file)) {
           try {
             buffer = await applyPdfStamps(buffer, {
-              master: true,
-              controlled: true,
+              obsolete: !!file.is_archived,
+              controlled: !file.is_archived,
             });
           } catch (stampErr) {
             console.warn(

@@ -385,8 +385,9 @@ const downloadFile = async (req, res, next) => {
     res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
     // Download stamps:
-    // - archived → OBSOLETE (first + last page)
-    // - active → Master Copy (first page) + Controlled Copy (bottom-right)
+    // - archived → OBSOLETE (top-center, first + last page)
+    // - active → Controlled Copy only (bottom-center)
+    // Master Copy is open-only (when has_master_stamp), not on download.
     if (isPdfFile(file)) {
       try {
         let pdfBuffer = await getFileBuffer(file);
@@ -394,7 +395,6 @@ const downloadFile = async (req, res, next) => {
           pdfBuffer = await applyPdfStamps(pdfBuffer, { obsolete: true });
         } else {
           pdfBuffer = await applyPdfStamps(pdfBuffer, {
-            master: true,
             controlled: true,
           });
         }

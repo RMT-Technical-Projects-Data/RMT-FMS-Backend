@@ -367,13 +367,14 @@ const downloadFile = async (req, res, next) => {
       return res.status(404).json({ error: "File path not found" });
     }
 
-    // Audit log — who downloaded what, and when
+    // Audit log — who downloaded what, when, and document status (stamp type)
     try {
       await logDownloadActivity({
         userId,
         username,
         fileId: file.id,
         documentName: file.name,
+        documentStatus: file.is_archived ? "obsolete" : "controlled",
         ipAddress: req.ip || req.headers["x-forwarded-for"] || null,
       });
     } catch (auditErr) {

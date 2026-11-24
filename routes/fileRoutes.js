@@ -217,8 +217,21 @@ router.get("/open/:id/url", authMiddleware, async (req, res) => {
     { expiresIn: "5m" }
   );
 
-  const protocol = req.protocol;
-  const host = req.get("host");
+  // Prefer public HTTPS URL (needed for Office Online viewer)
+  const forwardedProto = (req.get("x-forwarded-proto") || "")
+    .split(",")[0]
+    .trim();
+  const forwardedHost = (req.get("x-forwarded-host") || "")
+    .split(",")[0]
+    .trim();
+  const host = forwardedHost || req.get("host");
+  let protocol = forwardedProto || req.protocol || "http";
+  if (
+    host &&
+    (host.includes("duckdns.org") || host.includes("amazonaws.com"))
+  ) {
+    protocol = "https";
+  }
   const baseUrl = `${protocol}://${host}/api`;
   const openUrl = `${baseUrl}/files/open/direct/${fileId}?token=${tempToken}`;
   res.json({ url: openUrl, is_archived: !!file.is_archived });
@@ -266,6 +279,8 @@ router.get("/open/direct/:id", async (req, res) => {
             "Content-Disposition",
             `inline; filename="${file.name}"`
           );
+          res.setHeader("Access-Control-Allow-Origin", "*");
+          res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
           res.setHeader("Content-Length", pdfBuffer.length);
           return res.send(pdfBuffer);
         } catch (stampErr) {
@@ -278,6 +293,9 @@ router.get("/open/direct/:id", async (req, res) => {
       const readable = await getFileReadable(file);
       res.setHeader("Content-Type", mimeType);
       res.setHeader("Content-Disposition", `inline; filename="${file.name}"`);
+      // Allow Office Online / external viewers to fetch this short-lived URL
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
       readable.pipe(res);
     } catch (streamErr) {
       console.error(`❌ [open/direct] Stream error:`, streamErr);

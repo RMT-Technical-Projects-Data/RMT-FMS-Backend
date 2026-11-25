@@ -411,13 +411,19 @@ const downloadFolder = async (req, res, next) => {
       }
     }
 
+    const stampRaw = String(req.query.stamp ?? "1").toLowerCase();
+    const withStamp = !(
+      stampRaw === "0" ||
+      stampRaw === "false" ||
+      stampRaw === "no"
+    );
+
     let added = 0;
     for (const file of allFiles) {
       try {
         let buffer = await getFileBuffer(file);
 
-        // Folder ZIP uses same download stamp rules as single-file download
-        if (isPdfFile(file)) {
+        if (withStamp && isPdfFile(file)) {
           try {
             buffer = await applyPdfStamps(buffer, {
               obsolete: !!file.is_archived,

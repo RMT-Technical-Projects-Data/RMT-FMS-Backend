@@ -384,11 +384,14 @@ const downloadFile = async (req, res, next) => {
     const contentType = file.mime_type || "application/octet-stream";
     res.setHeader("Content-Disposition", `attachment; filename="${file.name}"`);
 
-    // Download stamps:
+    // stamp query: "1"/"true" → apply stamps; "0"/"false" → original file
+    const stampRaw = String(req.query.stamp ?? "1").toLowerCase();
+    const withStamp = !(stampRaw === "0" || stampRaw === "false" || stampRaw === "no");
+
+    // Download stamps (only when requested):
     // - archived → OBSOLETE (top-center)
     // - active → MASTER COPY (top-center) + CONTROLLED COPY (bottom-center)
-    // Open-with-stamp (has_master_stamp) shows MASTER COPY only — see open/direct.
-    if (isPdfFile(file)) {
+    if (withStamp && isPdfFile(file)) {
       try {
         let pdfBuffer = await getFileBuffer(file);
         if (file.is_archived) {

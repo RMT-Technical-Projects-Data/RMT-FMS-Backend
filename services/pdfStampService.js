@@ -148,7 +148,12 @@ const applyPdfStamps = async (pdfBuffer, options = {}) => {
     }
   }
 
-  const stamped = await pdfDoc.save();
+  // Faster serialize for download path (large multi-page PDFs)
+  const stamped = await pdfDoc.save({
+    useObjectStreams: false,
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+  });
   return Buffer.from(stamped);
 };
 

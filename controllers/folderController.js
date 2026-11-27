@@ -462,64 +462,30 @@ const downloadFolder = async (req, res, next) => {
       stampRaw === "no"
     );
 
-    // Buffer files BEFORE streaming so we never send an empty zip on total failure
-    const prepared = [];
-    const skipped = [];
-    for (const file of allFiles) {
-      try {
-        let buffer = await getFileBuffer(file);
-
-        if (withStamp && isPdfFile(file)) {
-          try {
-            buffer = await applyPdfStamps(buffer, {
-              obsolete: !!file.is_archived,
-              master: !file.is_archived,
-              controlled: !file.is_archived,
-            });
-          } catch (stampErr) {
-            console.warn(
-              `⚠️ Stamp skipped for ${file.name}:`,
-              stampErr.message
-            );
-          }
+    const loadFileForZip = async (file) => {
+      let buffer = await getFileBuffer(file);
+      if (withStamp && isPdfFile(file)) {
+        try {
+          buffer = await applyPdfStamps(buffer, {
+            obsolete: !!file.is_archived,
+            master: !file.is_archived,
+            controlled: !file.is_archived,
+          });
+        } catch (stampErr) {
+          console.warn(`⚠️ Stamp skipped for ${file.name}:`, stampErr.message);
         }
-
-        prepared.push({
-          relativePath: file.relativePath || file.original_name || file.name,
-          buffer,
-        });
-      } catch (fileErr) {
-        skipped.push({
-          name: file.name,
-          path: file.file_path,
-          error: fileErr.message,
-        });
-        console.error(
-          `⚠️ Skipping file ${file.name} (${file.file_path}):`,
-          fileErr.message
-        );
       }
-    }
+      return {
+        relativePath: file.relativePath || file.original_name || file.name,
+        buffer,
+      };
+    };
 
-    if (allFiles.length > 0 && prepared.length === 0) {
-      return res.status(422).json({
-        error:
-          "Folder download failed: none of the files could be read from storage.",
-        skipped: skipped.map((s) => s.name),
-      });
-    }
-
-    await auditFromReq(req, {
-      action: "download",
-      resourceType: "folder",
-      resourceId: folder.id,
-      resourceName: folder.name,
-      details: `Folder zip: ${prepared.length}/${allFiles.length} files${
-        skipped.length ? `; skipped ${skipped.length}` : ""
-      }`,
+    // Stream zip immediately (fast compression) — do not wait to buffer every file
+    const archive = archiver("zip", {
+      zlib: { level: 1 },
+      store: false,
     });
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
     archive.on("error", (err) => {
       console.error("Archive error:", err);
       if (!res.headersSent) {
@@ -532,6 +498,9 @@ const downloadFolder = async (req, res, next) => {
       "Content-Disposition",
       `attachment; filename="${folder.name}.zip"`
     );
+    // Hint proxies/browsers not to buffer the whole response
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Accel-Buffering", "no");
     archive.pipe(res);
 
     archive.append("", { name: `${rootPrefix}/` });
@@ -545,13 +514,61 @@ const downloadFolder = async (req, res, next) => {
       }
     }
 
-    for (const item of prepared) {
-      archive.append(item.buffer, { name: item.relativePath });
-      console.log(`📄 Added to zip: ${item.relativePath}`);
+    let added = 0;
+    const skipped = [];
+    // Prefetch next file while current is appended (pipeline of 2)
+    let pending =
+      allFiles.length > 0
+        ? loadFileForZip(allFiles[0]).catch((err) => ({ error: err, file: allFiles[0] }))
+        : null;
+
+    for (let i = 0; i < allFiles.length; i++) {
+      const current = await pending;
+      pending =
+        i + 1 < allFiles.length
+          ? loadFileForZip(allFiles[i + 1]).catch((err) => ({
+              error: err,
+              file: allFiles[i + 1],
+            }))
+          : null;
+
+      if (current?.error || !current?.buffer) {
+        const failedFile = current?.file || allFiles[i];
+        skipped.push({
+          name: failedFile?.name,
+          error: current?.error?.message || "read failed",
+        });
+        console.error(
+          `⚠️ Skipping file ${failedFile?.name}:`,
+          current?.error?.message || "read failed"
+        );
+        continue;
+      }
+
+      archive.append(current.buffer, { name: current.relativePath });
+      added += 1;
+      console.log(`📄 Added to zip: ${current.relativePath}`);
     }
 
+    if (allFiles.length > 0 && added === 0) {
+      archive.append(
+        "Folder download could not read any files from storage.\n",
+        { name: `${rootPrefix}/_DOWNLOAD_ERROR.txt` }
+      );
+    }
+
+    await auditFromReq(req, {
+      action: "download",
+      resourceType: "folder",
+      resourceId: folder.id,
+      resourceName: folder.name,
+      details: `Folder zip: ${added}/${allFiles.length} files${
+        skipped.length ? `; skipped ${skipped.length}` : ""
+      }; stamp=${withStamp ? "on" : "off"}`,
+    });
+
     console.log(
-      `✅ Folder zip ready: ${prepared.length}/${allFiles.length} files, ${uniqueFolders.length} folder paths`
+      `✅ Folder zip ready: ${added}/${allFiles.length} files, ${uniqueFolders.length} folder paths`
     );
     await archive.finalize();
   } catch (err) {

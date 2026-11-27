@@ -6,6 +6,7 @@ const { uploadFileToS3, deleteFileFromS3, copyFileInS3 } = require("./s3Service"
 const {
   findDeletedFolderTwin,
   resolveTrashParentId,
+  getFullyArchivedFolderIds,
 } = require("./folderService");
 
 const uploadFile = async (file, folderId, userId, customName = null) => {
@@ -933,8 +934,8 @@ const getArchivedFiles = async (userId, userRole, folderId = null) => {
 };
 
 /**
- * Folders that appear in Archive for a parent:
- * only ancestor folders of archived files (not every file in those folders).
+ * Folders that appear in Archive for a parent.
+ * Matches folderService: include fully-archived empty subfolders too.
  */
 const getArchivedFoldersByParent = async (userId, userRole, parentId = null) => {
   const role = (userRole || "").toLowerCase().trim();
@@ -971,16 +972,44 @@ const getArchivedFoldersByParent = async (userId, userRole, parentId = null) => 
     }
   }
 
+  const fullyArchived = await getFullyArchivedFolderIds();
+  for (const id of fullyArchived) {
+    relevantIds.add(Number(id));
+  }
+
   const parentKey =
     parentId === null || parentId === undefined || parentId === "null"
       ? null
       : parseInt(parentId, 10);
 
-  return allFolders.filter((folder) => {
-    if (!relevantIds.has(folder.id)) return false;
-    if (parentKey === null) return folder.parent_id == null;
-    return folder.parent_id === parentKey;
-  });
+  if (parentKey !== null && relevantIds.has(parentKey)) {
+    const parentFullyArchived = fullyArchived.has(parentKey);
+    return allFolders
+      .filter((folder) => {
+        if (Number(folder.parent_id) !== parentKey) return false;
+        if (parentFullyArchived) return true;
+        return relevantIds.has(folder.id) || fullyArchived.has(folder.id);
+      })
+      .sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+          sensitivity: "base",
+          numeric: true,
+        })
+      );
+  }
+
+  return allFolders
+    .filter((folder) => {
+      if (!relevantIds.has(folder.id)) return false;
+      if (parentKey === null) return folder.parent_id == null;
+      return Number(folder.parent_id) === parentKey;
+    })
+    .sort((a, b) =>
+      String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+        sensitivity: "base",
+        numeric: true,
+      })
+    );
 };
 
 module.exports = {

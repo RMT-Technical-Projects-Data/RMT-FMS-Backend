@@ -642,7 +642,9 @@ const restoreFolder = async (folderId) => {
 };
 
 /**
- * Archive navigation folders: ancestors of archived files only.
+ * Archive navigation folders:
+ * - ancestors of folders that contain archived files
+ * - plus fully-archived empty subfolders (so archived folder trees stay intact)
  */
 const getArchivedFoldersByParent = async (userId, userRole, parentId = null) => {
   const role = (userRole || "").toLowerCase().trim();
@@ -688,16 +690,48 @@ const getArchivedFoldersByParent = async (userId, userRole, parentId = null) => 
     }
   }
 
+  // Include empty descendants under fully archived trees so subfolders appear
+  const fullyArchived = await getFullyArchivedFolderIds();
+  for (const id of fullyArchived) {
+    relevantIds.add(Number(id));
+  }
+
   const parentKey =
     parentId === null || parentId === undefined || parentId === "null"
       ? null
       : parseInt(parentId, 10);
 
-  return allFolders.filter((folder) => {
-    if (!relevantIds.has(folder.id)) return false;
-    if (parentKey === null) return folder.parent_id == null;
-    return Number(folder.parent_id) === parentKey;
-  });
+  // Inside an archived folder: keep nested structure visible.
+  // If the whole parent tree is archived, show all children (including empty).
+  // Otherwise only show children on the archived path.
+  if (parentKey !== null && relevantIds.has(parentKey)) {
+    const parentFullyArchived = fullyArchived.has(parentKey);
+    return allFolders
+      .filter((folder) => {
+        if (Number(folder.parent_id) !== parentKey) return false;
+        if (parentFullyArchived) return true;
+        return relevantIds.has(folder.id) || fullyArchived.has(folder.id);
+      })
+      .sort((a, b) =>
+        String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+          sensitivity: "base",
+          numeric: true,
+        })
+      );
+  }
+
+  return allFolders
+    .filter((folder) => {
+      if (!relevantIds.has(folder.id)) return false;
+      if (parentKey === null) return folder.parent_id == null;
+      return Number(folder.parent_id) === parentKey;
+    })
+    .sort((a, b) =>
+      String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+        sensitivity: "base",
+        numeric: true,
+      })
+    );
 };
 
 const permanentDeleteFolder = async (folderId) => {

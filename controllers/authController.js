@@ -5,8 +5,14 @@ const { logActivity, getClientIp } = require("../services/auditService");
 
 const login = async (req, res, next) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, sessionMinutes } = req.body;
     const ipAddress = getClientIp(req);
+
+    // Default 5 minutes; allow 1–480 minutes from client settings
+    const parsedMins = parseInt(sessionMinutes, 10);
+    const sessionMins = Number.isFinite(parsedMins)
+      ? Math.min(Math.max(parsedMins, 1), 480)
+      : 5;
 
     const user = await db("users").where({ username }).first();
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
@@ -27,7 +33,7 @@ const login = async (req, res, next) => {
     const token = jwt.sign(
       { userId: user.id, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: "30m" }
+      { expiresIn: `${sessionMins}m` }
     );
 
     try {
@@ -36,7 +42,7 @@ const login = async (req, res, next) => {
         username: user.username,
         action: "login",
         resourceType: "auth",
-        details: `Role: ${user.role}`,
+        details: `Role: ${user.role}; session ${sessionMins}m`,
         ipAddress,
         status: "success",
       });
@@ -47,6 +53,7 @@ const login = async (req, res, next) => {
     res.json({
       token,
       user: { id: user.id, username: user.username, role: user.role },
+      sessionMinutes: sessionMins,
     });
   } catch (err) {
     console.log(err);

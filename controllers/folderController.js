@@ -273,8 +273,8 @@ const updateFolderDetails = async (req, res, next) => {
       resourceName: trimmedName,
       details:
         existingFolder.name !== trimmedName
-          ? `Renamed from "${existingFolder.name}"`
-          : null,
+          ? `Renamed from "${existingFolder.name}" to "${trimmedName}"`
+          : `Name unchanged ("${trimmedName}")`,
     });
 
     res.json(updatedFolder);

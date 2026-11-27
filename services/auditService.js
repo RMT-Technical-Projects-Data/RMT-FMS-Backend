@@ -1,9 +1,12 @@
 const os = require("os");
+const { execSync } = require("child_process");
 const knex = require("../config/db");
 
 let cachedLanIp = null;
 let cachedLanIpAt = 0;
 let cachedHasDeviceIpCol = null;
+let cachedHasDeviceMacCol = null;
+const macCache = new Map(); // ip -> { mac, at }
 
 const hasDeviceIpColumn = async () => {
   if (cachedHasDeviceIpCol != null) return cachedHasDeviceIpCol;
@@ -16,6 +19,105 @@ const hasDeviceIpColumn = async () => {
     cachedHasDeviceIpCol = false;
   }
   return cachedHasDeviceIpCol;
+};
+
+const hasDeviceMacColumn = async () => {
+  if (cachedHasDeviceMacCol != null) return cachedHasDeviceMacCol;
+  try {
+    cachedHasDeviceMacCol = await knex.schema.hasColumn(
+      "activity_audit_logs",
+      "device_mac"
+    );
+  } catch {
+    cachedHasDeviceMacCol = false;
+  }
+  return cachedHasDeviceMacCol;
+};
+
+const normalizeMac = (raw) => {
+  if (!raw) return null;
+  const cleaned = String(raw)
+    .trim()
+    .replace(/-/g, ":")
+    .toUpperCase();
+  if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(cleaned)) return null;
+  // Ignore empty / broadcast-ish
+  if (cleaned === "00:00:00:00:00:00" || cleaned === "FF:FF:FF:FF:FF:FF") {
+    return null;
+  }
+  return cleaned;
+};
+
+/**
+ * Resolve physical (MAC) address for a LAN IP via ARP / neighbor table.
+ * Works when the client is on the same network as the server.
+ */
+const getMacForIp = (ip) => {
+  const target = normalizeIp(ip);
+  if (!target || isLoopbackIp(target)) return null;
+
+  const cached = macCache.get(target);
+  if (cached && Date.now() - cached.at < 60_000) return cached.mac;
+
+  // If IP belongs to this machine, read MAC from OS interfaces
+  try {
+    const nets = os.networkInterfaces();
+    for (const entries of Object.values(nets || {})) {
+      if (!entries) continue;
+      for (const entry of entries) {
+        if (entry?.address === target && entry.mac) {
+          const localMac = normalizeMac(entry.mac);
+          if (localMac) {
+            macCache.set(target, { mac: localMac, at: Date.now() });
+            return localMac;
+          }
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  let mac = null;
+  try {
+    if (process.platform === "win32") {
+      const out = execSync(`arp -a ${target}`, {
+        encoding: "utf8",
+        timeout: 2500,
+        windowsHide: true,
+      });
+      // Match line that contains the IP, then MAC like aa-bb-cc-dd-ee-ff
+      const lines = out.split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.includes(target)) continue;
+        const m = line.match(/([0-9a-f]{2}[-:]){5}[0-9a-f]{2}/i);
+        if (m) {
+          mac = normalizeMac(m[0]);
+          break;
+        }
+      }
+    } else {
+      let out = "";
+      try {
+        out = execSync(`ip neigh show ${target}`, {
+          encoding: "utf8",
+          timeout: 2500,
+        });
+      } catch {
+        out = execSync(`arp -n ${target}`, {
+          encoding: "utf8",
+          timeout: 2500,
+        });
+      }
+      const m = out.match(/([0-9a-f]{2}:){5}[0-9a-f]{2}/i);
+      mac = normalizeMac(m ? m[0] : null);
+    }
+  } catch (e) {
+    console.warn(`⚠️ ARP lookup failed for ${target}:`, e.message);
+  }
+
+  macCache.set(target, { mac, at: Date.now() });
+  return mac;
 };
 
 const isLoopbackIp = (ip) => {
@@ -115,6 +217,21 @@ const getDeviceIp = (req) => {
   return ip;
 };
 
+/** Client-reported or server-resolved physical / MAC address */
+const getDeviceMac = (req, fallbackIp = null) => {
+  if (!req && !fallbackIp) return null;
+  const headerMac = normalizeMac(
+    req?.headers?.["x-client-device-mac"] ||
+      req?.headers?.["x-device-mac"] ||
+      null
+  );
+  if (headerMac) return headerMac;
+
+  const deviceIp = getDeviceIp(req);
+  const networkIp = fallbackIp || getClientIp(req);
+  return getMacForIp(deviceIp) || getMacForIp(networkIp);
+};
+
 /**
  * Record a document download for Super Admin audit review.
  */
@@ -126,6 +243,7 @@ const logDownloadActivity = async ({
   documentStatus = "controlled",
   ipAddress = null,
   deviceIp = null,
+  deviceMac = null,
 }) => {
   const status =
     String(documentStatus || "controlled").toLowerCase() === "obsolete"
@@ -153,6 +271,7 @@ const logDownloadActivity = async ({
       details: `Document status: ${status}`,
       ipAddress,
       deviceIp,
+      deviceMac,
       status: "success",
     });
   } catch (e) {
@@ -175,6 +294,7 @@ const logActivity = async ({
   details = null,
   ipAddress = null,
   deviceIp = null,
+  deviceMac = null,
   status = "success",
 }) => {
   if (!action) return null;
@@ -194,6 +314,9 @@ const logActivity = async ({
 
   if (await hasDeviceIpColumn()) {
     row.device_ip = deviceIp || null;
+  }
+  if (await hasDeviceMacColumn()) {
+    row.device_mac = deviceMac || null;
   }
 
   const [id] = await knex("activity_audit_logs").insert(row);
@@ -215,6 +338,9 @@ const auditFromReq = async (
   }
 ) => {
   try {
+    const ipAddress = getClientIp(req);
+    const deviceIp = getDeviceIp(req) || ipAddress;
+    const deviceMac = getDeviceMac(req, deviceIp || ipAddress);
     return await logActivity({
       userId: userId ?? req.user?.id ?? null,
       username:
@@ -227,8 +353,9 @@ const auditFromReq = async (
       resourceId,
       resourceName,
       details,
-      ipAddress: getClientIp(req),
-      deviceIp: getDeviceIp(req),
+      ipAddress,
+      deviceIp,
+      deviceMac,
       status,
     });
   } catch (e) {
@@ -304,14 +431,22 @@ const getActivityAuditLogs = async ({
   const [{ count }] = await countQuery.count({ count: "*" });
   const lanIp = getMachineLanIp();
   const hasDeviceCol = await hasDeviceIpColumn();
+  const hasMacCol = await hasDeviceMacColumn();
 
   return {
-    logs: logs.map((row) => ({
-      ...row,
-      ip_address: displayAuditIp(row.ip_address, lanIp),
-      device_ip: hasDeviceCol ? normalizeIp(row.device_ip) : null,
-      server_ip: lanIp,
-    })),
+    logs: logs.map((row) => {
+      const deviceIp = hasDeviceCol ? normalizeIp(row.device_ip) : null;
+      const deviceMac = hasMacCol ? normalizeMac(row.device_mac) : null;
+      return {
+        ...row,
+        ip_address: displayAuditIp(row.ip_address, lanIp),
+        device_ip: deviceIp,
+        device_mac: deviceMac,
+        // Prefer IP; fall back to physical address when IP is missing
+        device_display: deviceIp || deviceMac || null,
+        server_ip: lanIp,
+      };
+    }),
     total: Number(count) || 0,
     server_ip: lanIp,
   };
@@ -329,6 +464,8 @@ const displayAuditIp = (storedIp, lanIp = getMachineLanIp()) => {
 module.exports = {
   getClientIp,
   getDeviceIp,
+  getDeviceMac,
+  getMacForIp,
   getMachineLanIp,
   logDownloadActivity,
   logActivity,

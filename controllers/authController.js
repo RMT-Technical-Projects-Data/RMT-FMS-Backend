@@ -5,6 +5,7 @@ const {
   logActivity,
   getClientIp,
   getDeviceIp,
+  getDeviceMac,
   auditFromReq,
 } = require("../services/auditService");
 
@@ -12,7 +13,8 @@ const login = async (req, res, next) => {
   try {
     const { username, password, sessionMinutes } = req.body;
     const ipAddress = getClientIp(req);
-    const deviceIp = getDeviceIp(req);
+    const deviceIp = getDeviceIp(req) || ipAddress;
+    const deviceMac = getDeviceMac(req, deviceIp);
 
     // Default 5 minutes; allow 1–480 minutes from client settings
     const parsedMins = parseInt(sessionMinutes, 10);
@@ -31,6 +33,7 @@ const login = async (req, res, next) => {
           details: "Invalid credentials",
           ipAddress,
           deviceIp,
+          deviceMac,
           status: "failed",
         });
       } catch (_) {}
@@ -52,6 +55,7 @@ const login = async (req, res, next) => {
         details: `Role: ${user.role}; session ${sessionMins}m`,
         ipAddress,
         deviceIp,
+        deviceMac,
         status: "success",
       });
     } catch (auditErr) {

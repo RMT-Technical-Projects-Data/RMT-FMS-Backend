@@ -30,6 +30,7 @@ const {
   getActivityAuditLogs,
   getClientIp,
   getDeviceIp,
+  getDeviceMac,
   auditFromReq,
 } = require("../services/auditService");
 const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
@@ -396,7 +397,11 @@ const downloadFile = async (req, res, next) => {
         documentName: file.name,
         documentStatus: file.is_archived ? "obsolete" : "controlled",
         ipAddress: getClientIp(req),
-        deviceIp: getDeviceIp(req),
+        deviceIp: getDeviceIp(req) || getClientIp(req),
+        deviceMac: getDeviceMac(
+          req,
+          getDeviceIp(req) || getClientIp(req)
+        ),
       });
     } catch (auditErr) {
       console.error("⚠️ [downloadFile] Audit log failed:", auditErr.message);
@@ -737,14 +742,30 @@ const updateFileDetails = async (req, res, next) => {
       return res.status(400).json({ error: "No valid fields to update" });
     }
 
+    const existing = await knex("files").where({ id: fileId }).first();
     const updatedFile = await updateFile(fileId, updates);
     const action = updates.name ? "rename" : "edit";
+    let details = null;
+    if (updates.name) {
+      details = `Renamed from "${existing?.name || "unknown"}" to "${updates.name}"`;
+    } else {
+      const parts = [];
+      if (updates.created_at) {
+        parts.push(
+          `Upload date changed from "${existing?.created_at || "—"}" to "${updates.created_at.toISOString()}"`
+        );
+      }
+      if (typeof updates.has_master_stamp === "boolean") {
+        parts.push(`Master stamp set to ${updates.has_master_stamp}`);
+      }
+      details = parts.join("; ") || Object.keys(updates).join(", ");
+    }
     await auditFromReq(req, {
       action,
       resourceType: "file",
       resourceId: fileId,
       resourceName: updatedFile?.name || updates.name || `file:${fileId}`,
-      details: Object.keys(updates).join(", "),
+      details,
     });
     res.json(updatedFile);
   } catch (err) {

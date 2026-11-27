@@ -196,9 +196,13 @@ const getDownloadAuditLogs = async ({ limit = 200, offset = 0 } = {}) => {
     .offset(safeOffset);
 
   const [{ count }] = await knex("download_audit_logs").count({ count: "*" });
+  const lanIp = getMachineLanIp();
 
   return {
-    logs,
+    logs: logs.map((row) => ({
+      ...row,
+      ip_address: displayAuditIp(row.ip_address, lanIp),
+    })),
     total: Number(count) || 0,
   };
 };
@@ -233,15 +237,29 @@ const getActivityAuditLogs = async ({
     .offset(safeOffset);
 
   const [{ count }] = await countQuery.count({ count: "*" });
+  const lanIp = getMachineLanIp();
 
   return {
-    logs,
+    logs: logs.map((row) => ({
+      ...row,
+      ip_address: displayAuditIp(row.ip_address, lanIp),
+    })),
     total: Number(count) || 0,
   };
 };
 
+/** Show LAN IP for loopback/null so local audit UI is readable */
+const displayAuditIp = (storedIp, lanIp = getMachineLanIp()) => {
+  const normalized = normalizeIp(storedIp);
+  if (!normalized || isLoopbackIp(normalized)) {
+    return lanIp || normalized || "—";
+  }
+  return normalized;
+};
+
 module.exports = {
   getClientIp,
+  getMachineLanIp,
   logDownloadActivity,
   logActivity,
   getDownloadAuditLogs,

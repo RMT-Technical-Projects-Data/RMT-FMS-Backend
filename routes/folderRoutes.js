@@ -86,33 +86,44 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       .select("folders.*", db.raw("CASE WHEN user_favourite_folders.folder_id IS NOT NULL THEN true ELSE false END as favourited"))
       .orderBy("folders.created_at", "desc");
 
-    // 4. Create a Set of all accessible folder IDs (owned + permitted)
-    const permittedIdSet = new Set(permissionFolders.map(f => f.id));
-    const allAccessibleIds = new Set([...userOwnedIdSet, ...permittedIdSet]);
+    // Load active folders so we can walk up to a sensible dashboard entry
+    const allActiveFolders = await db("folders")
+      .where("is_deleted", false)
+      .select("id", "name", "parent_id", "created_by", "created_at");
+    const folderById = new Map(allActiveFolders.map((f) => [f.id, f]));
 
-    // 5. Filter permissionFolders
-    // Show a folder if:
-    // - It is a root folder (parent_id is null)
-    // - OR its parent is NOT accessible (not owned AND not in permission list)
-    const visiblePermissionFolders = permissionFolders.filter(folder => {
-      if (!folder.parent_id) return true; // It's a root folder, show it
+    // For each permitted/owned folder, surface the topmost active ancestor on the
+    // dashboard (so users see "Admin" instead of a deep nested "Version 1.0").
+    const visibleById = new Map();
+    const favById = new Map(permissionFolders.map((f) => [f.id, !!f.favourited]));
 
-      // If parent is accessible, HIDE this folder (user can navigate to it via parent)
-      if (allAccessibleIds.has(folder.parent_id)) return false;
+    const addVisible = (folder) => {
+      if (!folder || visibleById.has(folder.id)) return;
+      visibleById.set(folder.id, {
+        ...folder,
+        favourited: favById.get(folder.id) || false,
+      });
+    };
 
-      // Parent is NOT accessible, so SHOW this folder at root
-      return true;
-    });
-
-    // 6. Combine and deduplicate
-    const allFolders = [...userFolders];
-    const existingIds = new Set(userFolders.map(f => f.id));
-
-    for (const folder of visiblePermissionFolders) {
-      if (!existingIds.has(folder.id)) {
-        allFolders.push(folder);
+    for (const folder of [...userFolders, ...permissionFolders]) {
+      let current = folderById.get(folder.id) || folder;
+      while (current?.parent_id && folderById.has(current.parent_id)) {
+        current = folderById.get(current.parent_id);
       }
+      addVisible(current);
     }
+
+    for (const folder of [...userFolders, ...permissionFolders]) {
+      if (!folder.parent_id) addVisible(folderById.get(folder.id) || folder);
+    }
+
+    void userOwnedIdSet;
+
+    const allFolders = Array.from(visibleById.values()).sort((a, b) => {
+      const at = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bt = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return bt - at;
+    });
 
     console.log(`Found ${allFolders.length} root/accessible folders`);
     res.json({ folders: allFolders });

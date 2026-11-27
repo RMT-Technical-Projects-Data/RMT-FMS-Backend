@@ -1,12 +1,92 @@
+const os = require("os");
 const knex = require("../config/db");
 
-const getClientIp = (req) => {
-  if (!req) return null;
-  const forwarded = req.headers?.["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length) {
-    return forwarded.split(",")[0].trim();
+let cachedLanIp = null;
+let cachedLanIpAt = 0;
+
+const isLoopbackIp = (ip) => {
+  if (!ip) return true;
+  const normalized = String(ip).replace(/^::ffff:/i, "").trim();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "0:0:0:0:0:0:0:1" ||
+    normalized === "localhost"
+  );
+};
+
+/**
+ * Prefer a private LAN IPv4 (e.g. 192.168.x.x) so local audit logs show the PC IP
+ * instead of 127.0.0.1 when the browser hits localhost.
+ */
+const getMachineLanIp = () => {
+  const now = Date.now();
+  if (cachedLanIp && now - cachedLanIpAt < 60_000) return cachedLanIp;
+
+  const nets = os.networkInterfaces();
+  const candidates = [];
+
+  for (const entries of Object.values(nets)) {
+    if (!entries) continue;
+    for (const entry of entries) {
+      if (!entry || entry.internal) continue;
+      const family = entry.family;
+      const isV4 = family === "IPv4" || family === 4;
+      if (!isV4 || !entry.address) continue;
+      candidates.push(entry.address);
+    }
   }
-  return req.ip || req.socket?.remoteAddress || null;
+
+  const preferred =
+    candidates.find((ip) => ip.startsWith("192.168.")) ||
+    candidates.find((ip) => ip.startsWith("10.")) ||
+    candidates.find((ip) => /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) ||
+    candidates[0] ||
+    null;
+
+  cachedLanIp = preferred;
+  cachedLanIpAt = now;
+  return preferred;
+};
+
+const normalizeIp = (raw) => {
+  if (!raw) return null;
+  let ip = String(raw).trim();
+  if (!ip) return null;
+  // Strip IPv6-mapped IPv4 prefix
+  if (ip.toLowerCase().startsWith("::ffff:")) {
+    ip = ip.slice(7);
+  }
+  // Trim port if present (rare: host:port)
+  if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(ip)) {
+    ip = ip.split(":")[0];
+  }
+  return ip;
+};
+
+const getClientIp = (req) => {
+  if (!req) return getMachineLanIp();
+
+  const forwarded = req.headers?.["x-forwarded-for"];
+  let ip = null;
+  if (typeof forwarded === "string" && forwarded.length) {
+    ip = normalizeIp(forwarded.split(",")[0]);
+  }
+  if (!ip) {
+    ip = normalizeIp(
+      req.ip ||
+        req.socket?.remoteAddress ||
+        req.connection?.remoteAddress ||
+        null
+    );
+  }
+
+  // Local browser → backend: surface this machine's LAN IP for audit clarity
+  if (!ip || isLoopbackIp(ip)) {
+    return getMachineLanIp() || ip || "127.0.0.1";
+  }
+
+  return ip;
 };
 
 /**

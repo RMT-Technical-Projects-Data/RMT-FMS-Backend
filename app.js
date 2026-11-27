@@ -21,6 +21,9 @@ const errorMiddleware = require("./middlewares/errorMiddleware");
 
 const app = express();
 
+// Respect X-Forwarded-For when behind a proxy / load balancer
+app.set("trust proxy", true);
+
 // View engine setup
 app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "jade");

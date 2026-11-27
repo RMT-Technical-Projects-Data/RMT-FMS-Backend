@@ -381,7 +381,7 @@ const downloadFile = async (req, res, next) => {
         fileId: file.id,
         documentName: file.name,
         documentStatus: file.is_archived ? "obsolete" : "controlled",
-        ipAddress: req.ip || req.headers["x-forwarded-for"] || null,
+        ipAddress: getClientIp(req),
       });
     } catch (auditErr) {
       console.error("⚠️ [downloadFile] Audit log failed:", auditErr.message);
@@ -594,6 +594,7 @@ const getFiles = async (req, res, next) => {
           .andWhere("files.folder_id", folder_id)
           .andWhere("files.is_deleted", false)
           .andWhere("files.is_archived", false)
+          .andWhere("files.stamp_confirmed", true)
           .select("files.*")
           .orderBy("user_favourite_files.created_at", "desc");
         console.log(
@@ -613,6 +614,7 @@ const getFiles = async (req, res, next) => {
           .where("user_favourite_files.user_id", userId)
           .andWhere("files.is_deleted", false)
           .andWhere("files.is_archived", false)
+          .andWhere("files.stamp_confirmed", true)
           .orderBy("user_favourite_files.created_at", "desc");
       }
     } else {
@@ -622,7 +624,8 @@ const getFiles = async (req, res, next) => {
       if (userRole === 'super_admin') {
         let query = knex("files")
           .where("is_deleted", false)
-          .andWhere("is_archived", false);
+          .andWhere("is_archived", false)
+          .andWhere("stamp_confirmed", true);
 
         if (folder_id && folder_id !== "null" && folder_id !== "undefined") {
           query.where("folder_id", folder_id);
@@ -646,7 +649,8 @@ const getFiles = async (req, res, next) => {
         .where("permissions.user_id", userId)
         .where("permissions.can_read", true)
         .andWhere("files.is_deleted", false)
-        .andWhere("files.is_archived", false);
+        .andWhere("files.is_archived", false)
+        .andWhere("files.stamp_confirmed", true);
 
       if (folder_id) {
         permissionQuery.where("files.folder_id", folder_id);
@@ -735,6 +739,7 @@ const setMasterStampBatchController = async (req, res, next) => {
       )
       .update({
         has_master_stamp,
+        stamp_confirmed: true,
         updated_at: new Date(),
       });
 
@@ -995,6 +1000,7 @@ const searchFilesAndFolders = async (req, res, next) => {
       .select("files.*", "folders.name as folder_name")
       .where("files.is_deleted", false)
       .andWhere("files.is_archived", false)
+      .andWhere("files.stamp_confirmed", true)
       .andWhere(function () {
         this.where("files.name", "like", like).orWhere(
           "files.original_name",

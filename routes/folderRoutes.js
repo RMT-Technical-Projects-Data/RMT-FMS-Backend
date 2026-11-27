@@ -14,10 +14,14 @@ const {
   permanentDeleteFolderController,
   getArchivedFoldersController,
   archiveFolderController,
+  unarchiveFolderController,
 } = require("../controllers/folderController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
 const db = require("../config/db");
+const {
+  excludeFullyArchivedFolders,
+} = require("../services/folderService");
 const router = express.Router();
 
 // ✅ CORRECT ORDER: Specific routes first, dynamic routes last
@@ -47,7 +51,8 @@ router.get("/root", authMiddleware, async (req, res, next) => {
         .orderBy("created_at", "desc");
 
       const foldersWithFav = allRootFolders.map(f => ({ ...f, favourited: false }));
-      return res.json({ folders: foldersWithFav });
+      const visibleFolders = await excludeFullyArchivedFolders(foldersWithFav);
+      return res.json({ folders: visibleFolders });
     }
 
     // Normal User: Get own root folders
@@ -126,8 +131,10 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       return bt - at;
     });
 
-    console.log(`Found ${allFolders.length} root/accessible folders`);
-    res.json({ folders: allFolders });
+    const visibleFolders = await excludeFullyArchivedFolders(allFolders);
+
+    console.log(`Found ${visibleFolders.length} root/accessible folders`);
+    res.json({ folders: visibleFolders });
   } catch (err) {
     console.log("error in getting root folders", err);
     next(err);
@@ -151,7 +158,10 @@ const setResourceInfo = (req, res, next) => {
     req.action = "delete";
   } else if (req.method === "POST" && req.path.includes("/favourite/toggle")) {
     req.action = "edit";
-  } else if (req.method === "POST" && req.path.includes("/archive")) {
+  } else if (
+    req.method === "POST" &&
+    (req.path.includes("/archive") || req.path.includes("/unarchive"))
+  ) {
     req.action = "edit";
   }
 
@@ -167,6 +177,7 @@ router.get("/favourites", authMiddleware, getFavouriteFoldersController);
 router.get("/trash", authMiddleware, getTrashFoldersController);
 router.get("/archived", authMiddleware, getArchivedFoldersController);
 router.post("/:id/archive", authMiddleware, setResourceInfo, checkPermission, archiveFolderController);
+router.post("/:id/unarchive", authMiddleware, setResourceInfo, checkPermission, unarchiveFolderController);
 router.post("/:id/restore", authMiddleware, restoreFolderController);
 router.delete("/:id/permanent", authMiddleware, permanentDeleteFolderController);
 

@@ -850,6 +850,75 @@ const permanentDeleteFolder = async (folderId) => {
 };
 
 /**
+ * Folders that only exist under archived content (no active files in subtree).
+ * Used to hide them from the live dashboard while Archive still lists them.
+ */
+const getFullyArchivedFolderIds = async () => {
+  const allFolders = await knex("folders")
+    .where("is_deleted", false)
+    .select("id", "parent_id");
+
+  if (allFolders.length === 0) return new Set();
+
+  const fileRows = await knex("files")
+    .where("is_deleted", false)
+    .whereNotNull("folder_id")
+    .select("folder_id", "is_archived");
+
+  const byId = new Map(allFolders.map((f) => [f.id, f]));
+  const childrenByParent = new Map();
+  for (const folder of allFolders) {
+    const key = folder.parent_id == null ? null : folder.parent_id;
+    if (!childrenByParent.has(key)) childrenByParent.set(key, []);
+    childrenByParent.get(key).push(folder.id);
+  }
+
+  const markAncestors = (folderId, target) => {
+    let currentId = folderId;
+    while (currentId && byId.has(currentId)) {
+      if (target.has(currentId)) break;
+      target.add(currentId);
+      currentId = byId.get(currentId).parent_id;
+    }
+  };
+
+  const activeAncestors = new Set();
+  const archivedAncestors = new Set();
+  for (const row of fileRows) {
+    if (row.is_archived) markAncestors(row.folder_id, archivedAncestors);
+    else markAncestors(row.folder_id, activeAncestors);
+  }
+
+  const fullyArchived = new Set();
+  for (const folder of allFolders) {
+    if (archivedAncestors.has(folder.id) && !activeAncestors.has(folder.id)) {
+      fullyArchived.add(folder.id);
+    }
+  }
+
+  // Hide empty descendants under fully archived parents too
+  const queue = [...fullyArchived];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    for (const childId of childrenByParent.get(id) || []) {
+      if (!fullyArchived.has(childId) && !activeAncestors.has(childId)) {
+        fullyArchived.add(childId);
+        queue.push(childId);
+      }
+    }
+  }
+
+  return fullyArchived;
+};
+
+const excludeFullyArchivedFolders = async (folders) => {
+  if (!folders || folders.length === 0) return folders || [];
+  const fullyArchived = await getFullyArchivedFolderIds();
+  if (fullyArchived.size === 0) return folders;
+  return folders.filter((f) => !fullyArchived.has(Number(f.id)));
+};
+
+/**
  * Archive every non-deleted file in this folder and all nested subfolders.
  * Folder path then appears under Archive (same model as file archive).
  */
@@ -893,6 +962,32 @@ const archiveFolder = async (folderId) => {
   };
 };
 
+const unarchiveFolder = async (folderId) => {
+  const folder = await knex("folders").where({ id: folderId }).first();
+  if (!folder) throw new Error("Folder not found");
+  if (folder.is_deleted) throw new Error("Cannot unarchive a deleted folder");
+
+  const folderIds = await collectDescendantFolderIds(folderId);
+  const now = new Date();
+
+  const updated = await knex("files")
+    .whereIn("folder_id", folderIds)
+    .andWhere("is_deleted", false)
+    .andWhere("is_archived", true)
+    .update({
+      is_archived: false,
+      archived_at: null,
+      updated_at: now,
+    });
+
+  return {
+    id: folderId,
+    name: folder.name,
+    unarchivedFiles: updated,
+    folderCount: folderIds.length,
+  };
+};
+
 module.exports = {
   ensureFolderPath,
   createFolder,
@@ -913,4 +1008,7 @@ module.exports = {
   findDeletedFolderTwin,
   resolveTrashParentId,
   archiveFolder,
+  unarchiveFolder,
+  getFullyArchivedFolderIds,
+  excludeFullyArchivedFolders,
 };

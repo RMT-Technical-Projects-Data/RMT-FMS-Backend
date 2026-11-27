@@ -368,6 +368,7 @@ router.get("/root", authMiddleware, async (req, res, next) => {
         .whereNull("folder_id")
         .andWhere("is_deleted", false)
         .andWhere("is_archived", false)
+        .andWhere("stamp_confirmed", true)
         .select("*")
         .orderBy("created_at", "desc");
 
@@ -387,6 +388,7 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       .where("files.created_by", userId)
       .andWhere("files.is_deleted", false)
       .andWhere("files.is_archived", false)
+      .andWhere("files.stamp_confirmed", true)
       .select(
         "files.*",
         db.raw(
@@ -427,6 +429,7 @@ router.get("/root", authMiddleware, async (req, res, next) => {
       .where("permissions.can_read", true)
       .andWhere("files.is_deleted", false)
       .andWhere("files.is_archived", false)
+      .andWhere("files.stamp_confirmed", true)
       .select(
         "files.*",
         db.raw(

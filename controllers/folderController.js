@@ -19,6 +19,8 @@ const {
   permanentDeleteFolder,
   getArchivedFoldersByParent,
   archiveFolder,
+  unarchiveFolder,
+  excludeFullyArchivedFolders,
 } = require("../services/folderService");
 const { getFileBuffer } = require("../utils/fileContentHelper");
 const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
@@ -170,7 +172,13 @@ const getFolders = async (req, res, next) => {
       }
     }
 
-    res.json({ folders: allFolders });
+    // Hide folders that only contain archived content (they live under Archive)
+    const visibleFolders =
+      context === "favourites"
+        ? allFolders
+        : await excludeFullyArchivedFolders(allFolders);
+
+    res.json({ folders: visibleFolders });
   } catch (err) {
     console.error("Error in getFolders:", err);
     next(err);
@@ -359,12 +367,23 @@ const downloadFolder = async (req, res, next) => {
 
     console.log(`✅ Folder found: ${folder.name} (ID: ${folder.id})`);
 
-    // Collect active files + empty folder paths recursively (S3 + local)
+    const includeArchivedRaw = String(
+      req.query.include_archived ?? ""
+    ).toLowerCase();
+    const includeArchived =
+      includeArchivedRaw === "1" ||
+      includeArchivedRaw === "true" ||
+      includeArchivedRaw === "yes";
+
+    // Collect files + empty folder paths recursively (S3 + local)
     const collectTree = async (currentFolderId, parentPath = "") => {
-      const files = await knex("files")
+      let filesQuery = knex("files")
         .where("folder_id", currentFolderId)
-        .andWhere("is_deleted", false)
-        .andWhere("is_archived", false);
+        .andWhere("is_deleted", false);
+      if (!includeArchived) {
+        filesQuery = filesQuery.andWhere("is_archived", false);
+      }
+      const files = await filesQuery;
 
       const subfolders = await knex("folders")
         .where("parent_id", currentFolderId)
@@ -598,6 +617,39 @@ const archiveFolderController = async (req, res, next) => {
   }
 };
 
+const unarchiveFolderController = async (req, res, next) => {
+  try {
+    const folderId = parseInt(req.params.id, 10);
+    const result = await unarchiveFolder(folderId);
+
+    try {
+      await logActivity({
+        userId: req.user?.id || null,
+        username: req.user?.username || "Unknown",
+        action: "unarchive",
+        resourceType: "folder",
+        resourceId: folderId,
+        resourceName: result.name,
+        details: `Unarchived folder and ${result.unarchivedFiles} file(s)`,
+        ipAddress: getClientIp(req),
+      });
+    } catch (_) {}
+
+    res.json({
+      message: "Folder restored from archive",
+      ...result,
+    });
+  } catch (err) {
+    if (err.message === "Folder not found") {
+      return res.status(404).json({ error: err.message });
+    }
+    if (err.message === "Cannot unarchive a deleted folder") {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
+};
+
 module.exports = {
   createfolder,
   getfolder,
@@ -614,4 +666,5 @@ module.exports = {
   permanentDeleteFolderController,
   getArchivedFoldersController,
   archiveFolderController,
+  unarchiveFolderController,
 };

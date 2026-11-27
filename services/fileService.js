@@ -93,6 +93,8 @@ const uploadFile = async (file, folderId, userId, customName = null) => {
       created_by: userId,
       created_at: new Date(),
       updated_at: new Date(),
+      // Hidden from dashboard until With/Without Stamp is chosen
+      stamp_confirmed: false,
     });
 
     await trx.commit();
@@ -288,6 +290,8 @@ const uploadFolder = async (files, parentId, userId, paths = []) => {
           created_by: userId,
           created_at: new Date(),
           updated_at: new Date(),
+          // Hidden from dashboard until With/Without Stamp is chosen
+          stamp_confirmed: false,
         });
 
         uploadedFiles.push({
@@ -337,7 +341,8 @@ const getUserFiles = async (userId, folder_id = null) => {
     .select("files.*", "folders.name as folder_name", knex.raw("CASE WHEN user_favourite_files.file_id IS NOT NULL THEN true ELSE false END as favourited"))
     .where("files.created_by", userId)
     .andWhere("files.is_deleted", false)
-    .andWhere("files.is_archived", false);
+    .andWhere("files.is_archived", false)
+    .andWhere("files.stamp_confirmed", true);
 
   if (folder_id) {
     query = query.where("files.folder_id", folder_id);
@@ -799,6 +804,9 @@ const moveFile = async (fileId, targetFolderIds, userId) => {
         updated_at: new Date(),
         is_faviourite: false, // Reset favourite for copies
         is_deleted: false,
+        has_master_stamp: !!file.has_master_stamp,
+        stamp_confirmed: file.stamp_confirmed !== false,
+        is_archived: !!file.is_archived,
       });
     }
 

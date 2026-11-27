@@ -18,9 +18,11 @@ const {
   restoreFolder,
   permanentDeleteFolder,
   getArchivedFoldersByParent,
+  archiveFolder,
 } = require("../services/folderService");
 const { getFileBuffer } = require("../utils/fileContentHelper");
 const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
+const { logActivity, getClientIp } = require("../services/auditService");
 
 const createfolder = async (req, res, next) => {
   try {
@@ -269,7 +271,22 @@ const deleteFolderById = async (req, res, next) => {
     req.resourceId = folderId;
     req.action = "delete";
 
+    const existing = await knex("folders").where({ id: folderId }).first();
     await deleteFolder(folderId);
+
+    try {
+      await logActivity({
+        userId: req.user?.id,
+        username: req.user?.username,
+        action: "delete_folder",
+        resourceType: "folder",
+        resourceId: folderId,
+        resourceName: existing?.name || `folder:${folderId}`,
+        details: "Moved to trash",
+        ipAddress: getClientIp(req),
+      });
+    } catch (_) {}
+
     res.json({ message: "Folder deleted successfully" });
   } catch (err) {
     next(err);
@@ -548,6 +565,39 @@ const getArchivedFoldersController = async (req, res, next) => {
   }
 };
 
+const archiveFolderController = async (req, res, next) => {
+  try {
+    const folderId = parseInt(req.params.id, 10);
+    const result = await archiveFolder(folderId);
+
+    try {
+      await logActivity({
+        userId: req.user?.id || null,
+        username: req.user?.username || "Unknown",
+        action: "archive",
+        resourceType: "folder",
+        resourceId: folderId,
+        resourceName: result.name,
+        details: `Archived folder and ${result.archivedFiles} file(s)`,
+        ipAddress: getClientIp(req),
+      });
+    } catch (_) {}
+
+    res.json({
+      message: "Folder archived successfully",
+      ...result,
+    });
+  } catch (err) {
+    if (err.message === "Folder not found") {
+      return res.status(404).json({ error: err.message });
+    }
+    if (err.message === "Cannot archive a deleted folder") {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
+};
+
 module.exports = {
   createfolder,
   getfolder,
@@ -563,4 +613,5 @@ module.exports = {
   restoreFolderController,
   permanentDeleteFolderController,
   getArchivedFoldersController,
+  archiveFolderController,
 };

@@ -18,6 +18,7 @@ const {
   openFile,
   moveFileController,
   getDownloadAuditLogsController,
+  getActivityAuditLogsController,
   archiveFileController,
   unarchiveFileController,
   getArchivedFilesController,
@@ -171,6 +172,7 @@ router.get("/download/:id", authMiddleware, setFileResourceInfo, downloadFile);
 
 // Super Admin — download activity audit log
 router.get("/audit/downloads", authMiddleware, getDownloadAuditLogsController);
+router.get("/audit/activity", authMiddleware, getActivityAuditLogsController);
 
 // After upload: apply / clear Master Copy stamp preference
 router.post(

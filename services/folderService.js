@@ -849,6 +849,50 @@ const permanentDeleteFolder = async (folderId) => {
   return { id: folderId, permanentlyDeleted: true };
 };
 
+/**
+ * Archive every non-deleted file in this folder and all nested subfolders.
+ * Folder path then appears under Archive (same model as file archive).
+ */
+const collectDescendantFolderIds = async (rootFolderId) => {
+  const ids = [rootFolderId];
+  let frontier = [rootFolderId];
+  while (frontier.length > 0) {
+    const children = await knex("folders")
+      .whereIn("parent_id", frontier)
+      .andWhere("is_deleted", false)
+      .select("id");
+    frontier = children.map((c) => c.id);
+    ids.push(...frontier);
+  }
+  return ids;
+};
+
+const archiveFolder = async (folderId) => {
+  const folder = await knex("folders").where({ id: folderId }).first();
+  if (!folder) throw new Error("Folder not found");
+  if (folder.is_deleted) throw new Error("Cannot archive a deleted folder");
+
+  const folderIds = await collectDescendantFolderIds(folderId);
+  const now = new Date();
+
+  const updated = await knex("files")
+    .whereIn("folder_id", folderIds)
+    .andWhere("is_deleted", false)
+    .andWhere("is_archived", false)
+    .update({
+      is_archived: true,
+      archived_at: now,
+      updated_at: now,
+    });
+
+  return {
+    id: folderId,
+    name: folder.name,
+    archivedFiles: updated,
+    folderCount: folderIds.length,
+  };
+};
+
 module.exports = {
   ensureFolderPath,
   createFolder,
@@ -868,4 +912,5 @@ module.exports = {
   getArchivedFoldersByParent,
   findDeletedFolderTwin,
   resolveTrashParentId,
+  archiveFolder,
 };

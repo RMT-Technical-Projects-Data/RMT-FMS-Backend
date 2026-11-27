@@ -13,6 +13,7 @@ const {
   restoreFolderController,
   permanentDeleteFolderController,
   getArchivedFoldersController,
+  archiveFolderController,
 } = require("../controllers/folderController");
 const authMiddleware = require("../middlewares/authMiddleware");
 const checkPermission = require("../middlewares/permissionMiddleware");
@@ -150,6 +151,8 @@ const setResourceInfo = (req, res, next) => {
     req.action = "delete";
   } else if (req.method === "POST" && req.path.includes("/favourite/toggle")) {
     req.action = "edit";
+  } else if (req.method === "POST" && req.path.includes("/archive")) {
+    req.action = "edit";
   }
 
   console.log(`🔧 setResourceInfo: Set resourceType=${req.resourceType}, resourceId=${req.resourceId}, action=${req.action}`);
@@ -163,6 +166,7 @@ router.post("/:id/favourite/toggle", authMiddleware, setResourceInfo, checkPermi
 router.get("/favourites", authMiddleware, getFavouriteFoldersController);
 router.get("/trash", authMiddleware, getTrashFoldersController);
 router.get("/archived", authMiddleware, getArchivedFoldersController);
+router.post("/:id/archive", authMiddleware, setResourceInfo, checkPermission, archiveFolderController);
 router.post("/:id/restore", authMiddleware, restoreFolderController);
 router.delete("/:id/permanent", authMiddleware, permanentDeleteFolderController);
 

@@ -24,7 +24,13 @@ const {
   getArchivedFoldersByParent,
 } = require("../services/fileService");
 const { getFileStreamFromS3, uploadFileToS3 } = require("../services/s3Service");
-const { logDownloadActivity, getDownloadAuditLogs } = require("../services/auditService");
+const {
+  logDownloadActivity,
+  getDownloadAuditLogs,
+  getActivityAuditLogs,
+  logActivity,
+  getClientIp,
+} = require("../services/auditService");
 const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
 const { getFileBuffer, getFileReadable } = require("../utils/fileContentHelper");
 
@@ -756,6 +762,27 @@ const getDownloadAuditLogsController = async (req, res, next) => {
   }
 };
 
+const getActivityAuditLogsController = async (req, res, next) => {
+  try {
+    const role = (req.user.role || "").toLowerCase().trim();
+    if (role !== "super_admin") {
+      return res.status(403).json({ error: "Super Admin access required" });
+    }
+
+    const { limit, offset, action, username } = req.query;
+    const result = await getActivityAuditLogs({
+      limit,
+      offset,
+      action: action || null,
+      username: username || null,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("Error in getActivityAuditLogsController:", err);
+    next(err);
+  }
+};
+
 const archiveFileController = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
@@ -831,7 +858,22 @@ const deleteFileById = async (req, res, next) => {
     req.resourceId = fileId;
     req.action = "delete";
 
+    const existing = await knex("files").where({ id: fileId }).first();
     await deleteFile(fileId);
+
+    try {
+      await logActivity({
+        userId: req.user?.id,
+        username: req.user?.username,
+        action: "delete_file",
+        resourceType: "file",
+        resourceId: fileId,
+        resourceName: existing?.name || `file:${fileId}`,
+        details: "Moved to trash",
+        ipAddress: getClientIp(req),
+      });
+    } catch (_) {}
+
     res.json({ message: "File deleted successfully" });
   } catch (err) {
     console.error("Error in deleteFileById:", err);
@@ -1024,6 +1066,7 @@ module.exports = {
   restoreFileController,
   permanentDeleteFileController,
   getDownloadAuditLogsController,
+  getActivityAuditLogsController,
   setMasterStampBatchController,
   archiveFileController,
   unarchiveFileController,

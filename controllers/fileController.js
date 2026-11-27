@@ -28,8 +28,9 @@ const {
   logDownloadActivity,
   getDownloadAuditLogs,
   getActivityAuditLogs,
-  logActivity,
   getClientIp,
+  getDeviceIp,
+  auditFromReq,
 } = require("../services/auditService");
 const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
 const { getFileBuffer, getFileReadable } = require("../utils/fileContentHelper");
@@ -68,6 +69,19 @@ const uploadFiles = async (req, res, next) => {
       if (errors.length > 0) {
         console.warn(`⚠️ [Bulk Upload] ${errors.length} files failed to upload`);
       }
+
+      await auditFromReq(req, {
+        action: "upload",
+        resourceType: "file",
+        resourceId: uploaded[0]?.id || null,
+        resourceName:
+          uploaded.length === 1
+            ? uploaded[0].name
+            : `${uploaded.length} files`,
+        details: `Uploaded ${uploaded.length} file(s)${
+          folder_id ? ` into folder #${folder_id}` : " at root"
+        }${errors.length ? `; ${errors.length} failed` : ""}`,
+      });
 
       res.json({
         message: "Files processed",
@@ -382,6 +396,7 @@ const downloadFile = async (req, res, next) => {
         documentName: file.name,
         documentStatus: file.is_archived ? "obsolete" : "controlled",
         ipAddress: getClientIp(req),
+        deviceIp: getDeviceIp(req),
       });
     } catch (auditErr) {
       console.error("⚠️ [downloadFile] Audit log failed:", auditErr.message);
@@ -469,6 +484,14 @@ const openFile = async (req, res, next) => {
       console.log(`❌ [openFile] File is deleted - ID: ${fileId}`);
       return res.status(404).json({ error: "File not found" });
     }
+
+    await auditFromReq(req, {
+      action: "open",
+      resourceType: "file",
+      resourceId: file.id,
+      resourceName: file.name,
+      details: "Opened / previewed file",
+    });
 
     // Determine if it's an S3 file or Local file
     // Heuristic: If it has "uploads\" or is absolute path, it is likely local (Legacy)
@@ -715,6 +738,14 @@ const updateFileDetails = async (req, res, next) => {
     }
 
     const updatedFile = await updateFile(fileId, updates);
+    const action = updates.name ? "rename" : "edit";
+    await auditFromReq(req, {
+      action,
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: updatedFile?.name || updates.name || `file:${fileId}`,
+      details: Object.keys(updates).join(", "),
+    });
     res.json(updatedFile);
   } catch (err) {
     console.error("Error in updateFileDetails:", err);
@@ -792,6 +823,13 @@ const archiveFileController = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
     const file = await archiveFile(fileId);
+    await auditFromReq(req, {
+      action: "archive",
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: file?.name || `file:${fileId}`,
+      details: "Moved to archive",
+    });
     res.json({ message: "File archived successfully", file });
   } catch (err) {
     if (err.message === "File not found") {
@@ -808,6 +846,13 @@ const unarchiveFileController = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
     const file = await unarchiveFile(fileId);
+    await auditFromReq(req, {
+      action: "restore",
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: file?.name || `file:${fileId}`,
+      details: "Restored from archive",
+    });
     res.json({ message: "File restored from archive", file });
   } catch (err) {
     if (err.message === "File not found") {
@@ -866,18 +911,13 @@ const deleteFileById = async (req, res, next) => {
     const existing = await knex("files").where({ id: fileId }).first();
     await deleteFile(fileId);
 
-    try {
-      await logActivity({
-        userId: req.user?.id,
-        username: req.user?.username,
-        action: "delete_file",
-        resourceType: "file",
-        resourceId: fileId,
-        resourceName: existing?.name || `file:${fileId}`,
-        details: "Moved to trash",
-        ipAddress: getClientIp(req),
-      });
-    } catch (_) {}
+    await auditFromReq(req, {
+      action: "delete_file",
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: existing?.name || `file:${fileId}`,
+      details: "Moved to trash",
+    });
 
     res.json({ message: "File deleted successfully" });
   } catch (err) {
@@ -925,7 +965,15 @@ const getTrashFilesController = async (req, res, next) => {
 const restoreFileController = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
+    const existing = await knex("files").where({ id: fileId }).first();
     const result = await restoreFile(fileId);
+    await auditFromReq(req, {
+      action: "restore",
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: existing?.name || `file:${fileId}`,
+      details: "Restored from trash",
+    });
     res.json(result);
   } catch (err) {
     if (err.message === "File already exists") {
@@ -942,7 +990,15 @@ const restoreFileController = async (req, res, next) => {
 const permanentDeleteFileController = async (req, res, next) => {
   try {
     const fileId = parseInt(req.params.id);
+    const existing = await knex("files").where({ id: fileId }).first();
     const result = await permanentDeleteFile(fileId);
+    await auditFromReq(req, {
+      action: "permanent_delete",
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: existing?.name || `file:${fileId}`,
+      details: "Permanently deleted from trash",
+    });
     res.json(result);
   } catch (err) {
     console.error("Error in permanentDeleteFileController:", err);
@@ -955,9 +1011,17 @@ const moveFileController = async (req, res, next) => {
     const fileId = parseInt(req.params.id);
     const { targetFolderIds } = req.body;
     const userId = req.user.id;
+    const existing = await knex("files").where({ id: fileId }).first();
 
     // Call the service
     const result = await moveFile(fileId, targetFolderIds, userId);
+    await auditFromReq(req, {
+      action: "move",
+      resourceType: "file",
+      resourceId: fileId,
+      resourceName: existing?.name || `file:${fileId}`,
+      details: `Moved to folder(s): ${(targetFolderIds || []).join(", ")}`,
+    });
     res.json(result);
 
   } catch (err) {

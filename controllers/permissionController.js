@@ -1,5 +1,6 @@
 // controllers/permissionController.js
 const db = require("../config/db");
+const { auditFromReq } = require("../services/auditService");
 
 const assignPermission = async (req, res, next) => {
   try {
@@ -156,6 +157,14 @@ const assignPermission = async (req, res, next) => {
       console.log(`✅ Inheritance applied successfully`);
     }
 
+    await auditFromReq(req, {
+      action: "permission",
+      resourceType: resource_type,
+      resourceId: resource_id,
+      resourceName: `${resource_type} #${resource_id}`,
+      details: `Assigned to user #${user_id} (read=${!!can_read}, download=${!!can_download})`,
+    });
+
     res.json({
       id: permId,
       message: "Permission assigned successfully",
@@ -249,6 +258,14 @@ const removePermission = async (req, res, next) => {
 
     // Finally delete the target permission
     await db("permissions").where({ id: permission_id }).del();
+
+    await auditFromReq(req, {
+      action: "permission",
+      resourceType: resource_type,
+      resourceId: resource_id,
+      resourceName: `${resource_type} #${resource_id}`,
+      details: `Removed permission for user #${user_id}`,
+    });
 
     res.json({ message: "Permission removed successfully" });
   } catch (err) {

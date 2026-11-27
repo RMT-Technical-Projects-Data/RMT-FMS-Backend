@@ -24,7 +24,7 @@ const {
 } = require("../services/folderService");
 const { getFileBuffer } = require("../utils/fileContentHelper");
 const { isPdfFile, applyPdfStamps } = require("../services/pdfStampService");
-const { logActivity, getClientIp } = require("../services/auditService");
+const { auditFromReq } = require("../services/auditService");
 
 const createfolder = async (req, res, next) => {
   try {
@@ -53,6 +53,13 @@ const createfolder = async (req, res, next) => {
     req.action = "create";
 
     const folder = await createFolder(name, parent_id, req.user.id);
+    await auditFromReq(req, {
+      action: "create_folder",
+      resourceType: "folder",
+      resourceId: folder.id,
+      resourceName: folder.name,
+      details: parent_id ? `Parent folder #${parent_id}` : "Root folder",
+    });
     res.json(folder);
   } catch (err) {
     console.log("error in controller", err);
@@ -259,6 +266,17 @@ const updateFolderDetails = async (req, res, next) => {
 
     console.log("Folder updated successfully:", updatedFolder);
 
+    await auditFromReq(req, {
+      action: "rename",
+      resourceType: "folder",
+      resourceId: folderId,
+      resourceName: trimmedName,
+      details:
+        existingFolder.name !== trimmedName
+          ? `Renamed from "${existingFolder.name}"`
+          : null,
+    });
+
     res.json(updatedFolder);
   } catch (err) {
     console.error("Error in updateFolderDetails:", {
@@ -282,18 +300,13 @@ const deleteFolderById = async (req, res, next) => {
     const existing = await knex("folders").where({ id: folderId }).first();
     await deleteFolder(folderId);
 
-    try {
-      await logActivity({
-        userId: req.user?.id,
-        username: req.user?.username,
-        action: "delete_folder",
-        resourceType: "folder",
-        resourceId: folderId,
-        resourceName: existing?.name || `folder:${folderId}`,
-        details: "Moved to trash",
-        ipAddress: getClientIp(req),
-      });
-    } catch (_) {}
+    await auditFromReq(req, {
+      action: "delete_folder",
+      resourceType: "folder",
+      resourceId: folderId,
+      resourceName: existing?.name || `folder:${folderId}`,
+      details: "Moved to trash",
+    });
 
     res.json({ message: "Folder deleted successfully" });
   } catch (err) {
@@ -341,6 +354,16 @@ const uploadFolderWithFiles = async (req, res, next) => {
     const paths = req.body.paths;
 
     const uploadedFiles = await uploadFolder(req.files, parent_id, userId, paths);
+    await auditFromReq(req, {
+      action: "upload",
+      resourceType: "folder",
+      resourceId: parent_id || null,
+      resourceName:
+        uploadedFiles?.length === 1
+          ? uploadedFiles[0].name
+          : `${uploadedFiles?.length || 0} files (folder upload)`,
+      details: `Folder upload: ${uploadedFiles?.length || 0} file(s)`,
+    });
 
     res.json({
       message: "Folder uploaded successfully with structure preserved",
@@ -370,17 +393,17 @@ const downloadFolder = async (req, res, next) => {
     const includeArchivedRaw = String(
       req.query.include_archived ?? ""
     ).toLowerCase();
-    const includeArchived =
+    let includeArchived =
       includeArchivedRaw === "1" ||
       includeArchivedRaw === "true" ||
       includeArchivedRaw === "yes";
 
     // Collect files + empty folder paths recursively (S3 + local)
-    const collectTree = async (currentFolderId, parentPath = "") => {
+    const collectTree = async (currentFolderId, parentPath = "", withArchived) => {
       let filesQuery = knex("files")
         .where("folder_id", currentFolderId)
         .andWhere("is_deleted", false);
-      if (!includeArchived) {
+      if (!withArchived) {
         filesQuery = filesQuery.andWhere("is_archived", false);
       }
       const files = await filesQuery;
@@ -403,10 +426,9 @@ const downloadFolder = async (req, res, next) => {
         const subfolderPath = parentPath
           ? `${parentPath}/${subfolder.name}`
           : subfolder.name;
-        const nested = await collectTree(subfolder.id, subfolderPath);
+        const nested = await collectTree(subfolder.id, subfolderPath, withArchived);
         filesWithPath.push(...nested.files);
         folderPaths.push(...nested.folderPaths);
-        // Ensure empty subfolders are still represented
         if (nested.files.length === 0) {
           folderPaths.push(`${subfolderPath}/`);
         }
@@ -416,35 +438,21 @@ const downloadFolder = async (req, res, next) => {
     };
 
     const rootPrefix = folder.name;
-    const { files: allFiles, folderPaths } = await collectTree(
+    let { files: allFiles, folderPaths } = await collectTree(
       folderId,
-      rootPrefix
+      rootPrefix,
+      includeArchived
     );
 
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (err) => {
-      console.error("Archive error:", err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: "Failed to create archive" });
-      }
-    });
-
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${folder.name}.zip"`
-    );
-    archive.pipe(res);
-
-    // Always include root folder entry
-    archive.append("", { name: `${rootPrefix}/` });
-
-    // Include nested folder entries (including empty ones)
-    const uniqueFolders = [...new Set(folderPaths)];
-    for (const folderPath of uniqueFolders) {
-      if (folderPath && folderPath !== `${rootPrefix}/`) {
-        archive.append("", { name: folderPath.endsWith("/") ? folderPath : `${folderPath}/` });
-      }
+    // If live files were filtered out (e.g. fully archived tree), include archived
+    if (allFiles.length === 0 && !includeArchived) {
+      includeArchived = true;
+      const retry = await collectTree(folderId, rootPrefix, true);
+      allFiles = retry.files;
+      folderPaths = retry.folderPaths;
+      console.log(
+        `📦 Retry with archived files: ${allFiles.length} file(s) found`
+      );
     }
 
     const stampRaw = String(req.query.stamp ?? "1").toLowerCase();
@@ -454,7 +462,9 @@ const downloadFolder = async (req, res, next) => {
       stampRaw === "no"
     );
 
-    let added = 0;
+    // Buffer files BEFORE streaming so we never send an empty zip on total failure
+    const prepared = [];
+    const skipped = [];
     for (const file of allFiles) {
       try {
         let buffer = await getFileBuffer(file);
@@ -474,12 +484,16 @@ const downloadFolder = async (req, res, next) => {
           }
         }
 
-        const relativePath =
-          file.relativePath || file.original_name || file.name;
-        archive.append(buffer, { name: relativePath });
-        added += 1;
-        console.log(`📄 Added to zip: ${relativePath}`);
+        prepared.push({
+          relativePath: file.relativePath || file.original_name || file.name,
+          buffer,
+        });
       } catch (fileErr) {
+        skipped.push({
+          name: file.name,
+          path: file.file_path,
+          error: fileErr.message,
+        });
         console.error(
           `⚠️ Skipping file ${file.name} (${file.file_path}):`,
           fileErr.message
@@ -487,8 +501,57 @@ const downloadFolder = async (req, res, next) => {
       }
     }
 
+    if (allFiles.length > 0 && prepared.length === 0) {
+      return res.status(422).json({
+        error:
+          "Folder download failed: none of the files could be read from storage.",
+        skipped: skipped.map((s) => s.name),
+      });
+    }
+
+    await auditFromReq(req, {
+      action: "download",
+      resourceType: "folder",
+      resourceId: folder.id,
+      resourceName: folder.name,
+      details: `Folder zip: ${prepared.length}/${allFiles.length} files${
+        skipped.length ? `; skipped ${skipped.length}` : ""
+      }`,
+    });
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (err) => {
+      console.error("Archive error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to create archive" });
+      }
+    });
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${folder.name}.zip"`
+    );
+    archive.pipe(res);
+
+    archive.append("", { name: `${rootPrefix}/` });
+
+    const uniqueFolders = [...new Set(folderPaths)];
+    for (const folderPath of uniqueFolders) {
+      if (folderPath && folderPath !== `${rootPrefix}/`) {
+        archive.append("", {
+          name: folderPath.endsWith("/") ? folderPath : `${folderPath}/`,
+        });
+      }
+    }
+
+    for (const item of prepared) {
+      archive.append(item.buffer, { name: item.relativePath });
+      console.log(`📄 Added to zip: ${item.relativePath}`);
+    }
+
     console.log(
-      `✅ Folder zip ready: ${added}/${allFiles.length} files, ${uniqueFolders.length} folder paths`
+      `✅ Folder zip ready: ${prepared.length}/${allFiles.length} files, ${uniqueFolders.length} folder paths`
     );
     await archive.finalize();
   } catch (err) {
@@ -541,7 +604,15 @@ const getTrashFoldersController = async (req, res, next) => {
 const restoreFolderController = async (req, res, next) => {
   try {
     const folderId = parseInt(req.params.id);
+    const existing = await knex("folders").where({ id: folderId }).first();
     const result = await restoreFolder(folderId);
+    await auditFromReq(req, {
+      action: "restore",
+      resourceType: "folder",
+      resourceId: folderId,
+      resourceName: existing?.name || `folder:${folderId}`,
+      details: "Restored from trash",
+    });
     res.json(result);
   } catch (err) {
     if (err.message.includes("already exists")) {
@@ -555,7 +626,15 @@ const restoreFolderController = async (req, res, next) => {
 const permanentDeleteFolderController = async (req, res, next) => {
   try {
     const folderId = parseInt(req.params.id);
+    const existing = await knex("folders").where({ id: folderId }).first();
     const result = await permanentDeleteFolder(folderId);
+    await auditFromReq(req, {
+      action: "permanent_delete",
+      resourceType: "folder",
+      resourceId: folderId,
+      resourceName: existing?.name || `folder:${folderId}`,
+      details: "Permanently deleted from trash",
+    });
     res.json(result);
   } catch (err) {
     console.error("Error in permanentDeleteFolderController:", err);
@@ -589,18 +668,13 @@ const archiveFolderController = async (req, res, next) => {
     const folderId = parseInt(req.params.id, 10);
     const result = await archiveFolder(folderId);
 
-    try {
-      await logActivity({
-        userId: req.user?.id || null,
-        username: req.user?.username || "Unknown",
-        action: "archive",
-        resourceType: "folder",
-        resourceId: folderId,
-        resourceName: result.name,
-        details: `Archived folder and ${result.archivedFiles} file(s)`,
-        ipAddress: getClientIp(req),
-      });
-    } catch (_) {}
+    await auditFromReq(req, {
+      action: "archive",
+      resourceType: "folder",
+      resourceId: folderId,
+      resourceName: result.name,
+      details: `Archived folder and ${result.archivedFiles} file(s)`,
+    });
 
     res.json({
       message: "Folder archived successfully",
@@ -622,18 +696,13 @@ const unarchiveFolderController = async (req, res, next) => {
     const folderId = parseInt(req.params.id, 10);
     const result = await unarchiveFolder(folderId);
 
-    try {
-      await logActivity({
-        userId: req.user?.id || null,
-        username: req.user?.username || "Unknown",
-        action: "unarchive",
-        resourceType: "folder",
-        resourceId: folderId,
-        resourceName: result.name,
-        details: `Unarchived folder and ${result.unarchivedFiles} file(s)`,
-        ipAddress: getClientIp(req),
-      });
-    } catch (_) {}
+    await auditFromReq(req, {
+      action: "restore",
+      resourceType: "folder",
+      resourceId: folderId,
+      resourceName: result.name,
+      details: `Unarchived folder and ${result.unarchivedFiles} file(s)`,
+    });
 
     res.json({
       message: "Folder restored from archive",

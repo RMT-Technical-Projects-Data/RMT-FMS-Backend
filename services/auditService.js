@@ -3,6 +3,20 @@ const knex = require("../config/db");
 
 let cachedLanIp = null;
 let cachedLanIpAt = 0;
+let cachedHasDeviceIpCol = null;
+
+const hasDeviceIpColumn = async () => {
+  if (cachedHasDeviceIpCol != null) return cachedHasDeviceIpCol;
+  try {
+    cachedHasDeviceIpCol = await knex.schema.hasColumn(
+      "activity_audit_logs",
+      "device_ip"
+    );
+  } catch {
+    cachedHasDeviceIpCol = false;
+  }
+  return cachedHasDeviceIpCol;
+};
 
 const isLoopbackIp = (ip) => {
   if (!ip) return true;
@@ -53,17 +67,16 @@ const normalizeIp = (raw) => {
   if (!raw) return null;
   let ip = String(raw).trim();
   if (!ip) return null;
-  // Strip IPv6-mapped IPv4 prefix
   if (ip.toLowerCase().startsWith("::ffff:")) {
     ip = ip.slice(7);
   }
-  // Trim port if present (rare: host:port)
   if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(ip)) {
     ip = ip.split(":")[0];
   }
   return ip;
 };
 
+/** Connection / Wi‑Fi network IP as seen by the server */
 const getClientIp = (req) => {
   if (!req) return getMachineLanIp();
 
@@ -81,11 +94,24 @@ const getClientIp = (req) => {
     );
   }
 
-  // Local browser → backend: surface this machine's LAN IP for audit clarity
   if (!ip || isLoopbackIp(ip)) {
     return getMachineLanIp() || ip || "127.0.0.1";
   }
 
+  return ip;
+};
+
+/** Client-reported device/LAN IP (from browser WebRTC via header) */
+const getDeviceIp = (req) => {
+  if (!req) return null;
+  const raw =
+    req.headers?.["x-client-device-ip"] ||
+    req.headers?.["x-device-ip"] ||
+    null;
+  const ip = normalizeIp(raw);
+  if (!ip || isLoopbackIp(ip)) return null;
+  // Basic IPv4 sanity
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return null;
   return ip;
 };
 
@@ -99,6 +125,7 @@ const logDownloadActivity = async ({
   documentName,
   documentStatus = "controlled",
   ipAddress = null,
+  deviceIp = null,
 }) => {
   const status =
     String(documentStatus || "controlled").toLowerCase() === "obsolete"
@@ -115,7 +142,6 @@ const logDownloadActivity = async ({
     ip_address: ipAddress,
   });
 
-  // Also write into unified activity log
   try {
     await logActivity({
       userId,
@@ -126,6 +152,7 @@ const logDownloadActivity = async ({
       resourceName: documentName,
       details: `Document status: ${status}`,
       ipAddress,
+      deviceIp,
       status: "success",
     });
   } catch (e) {
@@ -147,11 +174,12 @@ const logActivity = async ({
   resourceName = null,
   details = null,
   ipAddress = null,
+  deviceIp = null,
   status = "success",
 }) => {
   if (!action) return null;
 
-  const [id] = await knex("activity_audit_logs").insert({
+  const row = {
     user_id: userId,
     username: username || "Unknown",
     action: String(action).slice(0, 64),
@@ -162,14 +190,53 @@ const logActivity = async ({
     ip_address: ipAddress,
     status: status || "success",
     created_at: new Date(),
-  });
+  };
 
+  if (await hasDeviceIpColumn()) {
+    row.device_ip = deviceIp || null;
+  }
+
+  const [id] = await knex("activity_audit_logs").insert(row);
   return knex("activity_audit_logs").where({ id }).first();
 };
 
-/**
- * List download audit logs (newest first). Super Admin only at route layer.
- */
+/** Convenience: log from an Express request */
+const auditFromReq = async (
+  req,
+  {
+    action,
+    resourceType = null,
+    resourceId = null,
+    resourceName = null,
+    details = null,
+    status = "success",
+    userId = null,
+    username = null,
+  }
+) => {
+  try {
+    return await logActivity({
+      userId: userId ?? req.user?.id ?? null,
+      username:
+        username ||
+        req.user?.username ||
+        req.body?.username ||
+        "Unknown",
+      action,
+      resourceType,
+      resourceId,
+      resourceName,
+      details,
+      ipAddress: getClientIp(req),
+      deviceIp: getDeviceIp(req),
+      status,
+    });
+  } catch (e) {
+    console.error(`⚠️ audit (${action}) failed:`, e.message);
+    return null;
+  }
+};
+
 const getDownloadAuditLogs = async ({ limit = 200, offset = 0 } = {}) => {
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000);
   const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
@@ -202,14 +269,12 @@ const getDownloadAuditLogs = async ({ limit = 200, offset = 0 } = {}) => {
     logs: logs.map((row) => ({
       ...row,
       ip_address: displayAuditIp(row.ip_address, lanIp),
+      server_ip: lanIp,
     })),
     total: Number(count) || 0,
   };
 };
 
-/**
- * List full activity audit logs (newest first).
- */
 const getActivityAuditLogs = async ({
   limit = 300,
   offset = 0,
@@ -238,13 +303,17 @@ const getActivityAuditLogs = async ({
 
   const [{ count }] = await countQuery.count({ count: "*" });
   const lanIp = getMachineLanIp();
+  const hasDeviceCol = await hasDeviceIpColumn();
 
   return {
     logs: logs.map((row) => ({
       ...row,
       ip_address: displayAuditIp(row.ip_address, lanIp),
+      device_ip: hasDeviceCol ? normalizeIp(row.device_ip) : null,
+      server_ip: lanIp,
     })),
     total: Number(count) || 0,
+    server_ip: lanIp,
   };
 };
 
@@ -259,9 +328,11 @@ const displayAuditIp = (storedIp, lanIp = getMachineLanIp()) => {
 
 module.exports = {
   getClientIp,
+  getDeviceIp,
   getMachineLanIp,
   logDownloadActivity,
   logActivity,
+  auditFromReq,
   getDownloadAuditLogs,
   getActivityAuditLogs,
 };

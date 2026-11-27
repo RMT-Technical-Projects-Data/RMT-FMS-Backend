@@ -1,12 +1,18 @@
 const db = require("../config/db");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const { logActivity, getClientIp } = require("../services/auditService");
+const {
+  logActivity,
+  getClientIp,
+  getDeviceIp,
+  auditFromReq,
+} = require("../services/auditService");
 
 const login = async (req, res, next) => {
   try {
     const { username, password, sessionMinutes } = req.body;
     const ipAddress = getClientIp(req);
+    const deviceIp = getDeviceIp(req);
 
     // Default 5 minutes; allow 1–480 minutes from client settings
     const parsedMins = parseInt(sessionMinutes, 10);
@@ -24,6 +30,7 @@ const login = async (req, res, next) => {
           resourceType: "auth",
           details: "Invalid credentials",
           ipAddress,
+          deviceIp,
           status: "failed",
         });
       } catch (_) {}
@@ -44,6 +51,7 @@ const login = async (req, res, next) => {
         resourceType: "auth",
         details: `Role: ${user.role}; session ${sessionMins}m`,
         ipAddress,
+        deviceIp,
         status: "success",
       });
     } catch (auditErr) {
@@ -61,6 +69,19 @@ const login = async (req, res, next) => {
   }
 };
 
+const logout = async (req, res, next) => {
+  try {
+    await auditFromReq(req, {
+      action: "logout",
+      resourceType: "auth",
+      details: "User signed out",
+    });
+    res.json({ message: "Logged out" });
+  } catch (err) {
+    next(err);
+  }
+};
+
 const createUser = async (req, res, next) => {
   try {
     const { username, password, role } = req.body;
@@ -72,18 +93,13 @@ const createUser = async (req, res, next) => {
       role,
     });
 
-    try {
-      await logActivity({
-        userId: req.user?.id || null,
-        username: req.user?.username || "Unknown",
-        action: "create_user",
-        resourceType: "user",
-        resourceId: userId,
-        resourceName: username,
-        details: `Created user with role ${role}`,
-        ipAddress: getClientIp(req),
-      });
-    } catch (_) {}
+    await auditFromReq(req, {
+      action: "create_user",
+      resourceType: "user",
+      resourceId: userId,
+      resourceName: username,
+      details: `Created user with role ${role}`,
+    });
 
     res.json({ id: userId, username, role });
   } catch (err) {
@@ -92,4 +108,4 @@ const createUser = async (req, res, next) => {
   }
 };
 
-module.exports = { login, createUser };
+module.exports = { login, createUser, logout };

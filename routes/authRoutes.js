@@ -6,6 +6,7 @@ const authMiddleware = require("../middlewares/authMiddleware");
 const authController = require("../controllers/authController");
 const router = express.Router();
 router.post("/login", authController.login);
+router.post("/logout", authMiddleware, authController.logout);
 // Create user
 router.post("/register", authMiddleware, async (req, res, next) => {
   try {
